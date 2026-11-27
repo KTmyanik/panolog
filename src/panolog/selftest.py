@@ -47,7 +47,9 @@ def _check_ui() -> str:
     from .snippets import SnippetRepository
     from .storage import Repository, connect
     from .storage.repository import text_hash
+    from .ui.draw_canvas import to_png
     from .ui.image_editor import ImageEditorDialog
+    from .ui.snippet_dialogs import SnippetEditDialog
     from .ui.popup import Popup
     from .ui.settings_dialog import SettingsDialog
     from .ui.themes import THEMES
@@ -57,7 +59,17 @@ def _check_ui() -> str:
     repo = Repository(conn)
     for text in ("SELECT 1 FROM dual;", "düz bir metin"):
         repo.add_item(Category.TEXT, text_hash(text), text=text)
-    popup = Popup(repo, SnippetRepository(conn))
+    snippets = SnippetRepository(conn)
+    # Görsel şablon: çiz, PNG olarak sakla, geri oku.
+    drawing = SnippetEditDialog(snippets)
+    drawing.canvas.add_stroke([(100.0, 100.0), (180.0, 60.0), (260.0, 110.0)])
+    drawn = drawing.canvas.image()
+    if drawn.isNull():
+        raise RuntimeError("çizim alanı görsel üretmedi")
+    saved = snippets.add("çizim", "", image=to_png(drawn))
+    if QImage.fromData(saved.image).size() != drawn.size():
+        raise RuntimeError("görsel şablon geri okunamadı")
+    popup = Popup(repo, snippets)
     # Her tema uygulanıp çizilir: stil sayfası, arka plan ve satır çizimi paketten yükleniyor mu?
     for key in THEMES:
         popup.set_theme(key, animate=False)
@@ -73,7 +85,9 @@ def _check_ui() -> str:
         raise RuntimeError("görsel düzenleyici işlem uygulamadı")
     if editor.session.image.pixel(10, 8) != 0xFF000000:
         raise RuntimeError("kapatılan alan siyah değil")
-    return f"pencereler oluşturuldu, {len(THEMES)} tema çizildi, düzenleyici çalıştı"
+    return (
+        f"pencereler oluşturuldu, {len(THEMES)} tema çizildi, düzenleyici ve çizim çalıştı"
+    )
 
 
 def _check_ocr() -> str:

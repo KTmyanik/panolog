@@ -45,6 +45,14 @@ def write_to_clipboard(item: Item, plain: bool = False) -> bool:
     return True
 
 
+def write_image_to_clipboard(image: QImage) -> None:
+    """Görseli (ör. düzenlenmiş bir kopyayı) clipboard'a yazar; izleyici yeniden kaydetmez."""
+    mime = QMimeData()
+    mime.setImageData(image)
+    mime.setData(INTERNAL_MIME, b"1")
+    QGuiApplication.clipboard().setMimeData(mime)
+
+
 def write_text_to_clipboard(text: str) -> None:
     """Düz metni (ör. açılmış bir şablonu) clipboard'a yazar; geçmişe kaydedilmez."""
     mime = QMimeData()

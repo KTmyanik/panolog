@@ -1,24 +1,33 @@
 """Bileşenleri birbirine bağlayan uygulama denetleyicisi."""
 from __future__ import annotations
 
+import shutil
 import time
+from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QSystemTrayIcon
+from PySide6.QtCore import QObject, QStandardPaths, QTimer
+from PySide6.QtGui import QGuiApplication, QImage
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QSystemTrayIcon
 
 from . import APP_NAME, paths, winapi
 from .classifier import Category, classify
 from .hotkey import GlobalHotkey, HotkeyError
-from .monitor import ClipboardListener, read_clipboard
+from .monitor import ClipboardListener, PauseState, read_clipboard
 from .ocr import OcrResult, OcrService, OcrUnavailable, pipeline
-from .paste import return_focus, write_text_to_clipboard, write_to_clipboard
+from .paste import (
+    return_focus,
+    write_image_to_clipboard,
+    write_text_to_clipboard,
+    write_to_clipboard,
+)
 from .sensitive import evaluate
 from .settings import Settings, SettingsStore, autostart
 from .snippets import SnippetRepository, expand
 from .storage import FileRef, Repository, connect
 from .storage.images import ImageStore, hash_image
 from .storage.repository import files_hash, text_hash
+from .ui.image_editor import ImageEditorDialog
 from .ui.popup import Popup
 from .ui.settings_dialog import SettingsDialog
 from .ui.snippet_dialogs import SnippetEditDialog, SnippetManagerDialog
@@ -29,11 +38,17 @@ _MAX_HTML_CHARS = 2_000_000
 _OCR_IDLE_RELEASE_MS = 120_000
 
 
+def default_image_name(now: datetime | None = None) -> str:
+    """Kaydedilen görsel için önerilen dosya adı (Windows'ta geçerli karakterlerle)."""
+    return f"{APP_NAME} {(now or datetime.now()):%Y-%m-%d %H%M%S}.png"
+
+
 class Controller(QObject):
     def __init__(self, app: QApplication) -> None:
         super().__init__()
         self._app = app
-        self._paused = False
+        self._pause = PauseState()
+        self._save_dir: str | None = None  # "PNG olarak kaydet" için son kullanılan klasör
         self._prev_window: int | None = None
         self._settings_dialog: SettingsDialog | None = None
 
@@ -49,11 +64,14 @@ class Controller(QObject):
         self._images.sweep_orphans(self._repo.image_files())
 
         self._popup = Popup(self._repo, self._snippets)
+        self._popup.set_theme(self._settings.theme, self._settings.animations)
         self._popup.pasteRequested.connect(self._paste)
         self._popup.snippetRequested.connect(self._paste_snippet)
         self._popup.saveAsSnippetRequested.connect(self._save_as_snippet)
         self._popup.editSnippetRequested.connect(self._edit_snippet)
         self._popup.ocrRequested.connect(self._ocr_requested)
+        self._popup.editImageRequested.connect(self._edit_image)
+        self._popup.saveImageRequested.connect(self._save_image)
 
         self._ocr = OcrService()
         self._ocr.finished.connect(self._ocr_finished)
@@ -69,6 +87,13 @@ class Controller(QObject):
         self._tray = Tray()
         self._tray.openRequested.connect(self.show_popup)
         self._tray.pauseToggled.connect(self._set_paused)
+        self._tray.pauseForRequested.connect(self._pause_for)
+        self._tray.skipNextToggled.connect(self._set_skip_next)
+        self._tray.menuOpening.connect(self._sync_pause)
+        # Süreli duraklatma ya da "sonraki kopya" kendiliğinden bitince tray güncellensin.
+        self._pause_timer = QTimer(self)
+        self._pause_timer.setSingleShot(True)
+        self._pause_timer.timeout.connect(self._sync_pause)
         self._tray.clearRequested.connect(self._clear_history)
         self._tray.settingsRequested.connect(self._open_settings)
         self._tray.snippetsRequested.connect(self._open_snippet_manager)
@@ -90,7 +115,7 @@ class Controller(QObject):
 
     # ---- clipboard izleme ---------------------------------------------------
     def _on_clipboard_changed(self, source_app: str | None) -> None:
-        if self._paused:
+        if self._pause.is_paused():
             return
         payload = read_clipboard()
         if payload.internal or payload.private or self._settings.is_excluded(source_app):
@@ -99,6 +124,10 @@ class Controller(QObject):
             has_files=bool(payload.files), has_image=payload.image is not None, text=payload.text
         )
         if category is None:
+            return
+        # Buraya gelen kopya normalde kaydedilirdi; "sonraki kopyayı kaydetme" onu tüketir.
+        if not self._pause.allow():
+            self._sync_pause()
             return
         limit = self._settings.limit_for(category)
         if category is Category.FILE:
@@ -110,28 +139,32 @@ class Controller(QObject):
                 limit=limit,
             )
         elif category is Category.IMAGE:
-            image = payload.image
-            digest = hash_image(image)
-            full, thumb = self._images.save(image, digest)
-            item, _created = self._repo.add_item(
-                category,
-                digest,
-                image_path=str(full),
-                thumb_path=str(thumb),
-                width=image.width(),
-                height=image.height(),
-                source_app=source_app,
-                limit=limit,
-            )
-            if self._settings.ocr_auto and not item.ocr_done and not self._ocr_disabled:
-                # Tam boy PNG henüz diske yazılıyor olabilir; görselin kendisi verilir.
-                self._ocr.request(item.id, image.copy(), interactive=False)
+            self._record_image(payload.image, source_app)
         else:
             html = payload.html if category is Category.TEXT else None
             if not self._record_text(category, payload.text or "", html, source_app):
                 return
         if self._popup.isVisible():
             self._popup.refresh()
+
+    def _record_image(self, image: QImage, source_app: str | None):
+        """Görseli diske ve geçmişe ekler; otomatik OCR açıksa okumayı başlatır."""
+        digest = hash_image(image)
+        full, thumb = self._images.save(image, digest)
+        item, _created = self._repo.add_item(
+            Category.IMAGE,
+            digest,
+            image_path=str(full),
+            thumb_path=str(thumb),
+            width=image.width(),
+            height=image.height(),
+            source_app=source_app,
+            limit=self._settings.limit_for(Category.IMAGE),
+        )
+        if self._settings.ocr_auto and not item.ocr_done and not self._ocr_disabled:
+            # Tam boy PNG henüz diske yazılıyor olabilir; görselin kendisi verilir.
+            self._ocr.request(item.id, image.copy(), interactive=False)
+        return item
 
     def _record_text(
         self, category: Category, text: str, html: str | None, source_app: str | None
@@ -187,6 +220,82 @@ class Controller(QObject):
         # Önce odağı geri ver, sonra gizle: popup hâlâ öndeyken odak değiştirmeye izin var.
         return_focus(self._prev_window, send_paste=self._settings.auto_paste)
         self._popup.hide()
+
+    # ---- görsel düzenleme ---------------------------------------------------
+    def _edit_image(self, item_id: int) -> None:
+        """Ctrl+E: görseli düzenleyicide aç; sonuç yeni bir görsel olarak kaydedilir."""
+        item = self._repo.get(item_id)
+        if item is None or item.category is not Category.IMAGE or self._dialog_open:
+            return
+        image = QImage(item.image_path) if item.image_path else QImage()
+        if image.isNull():
+            self._popup.show_status("Görsel dosyası okunamadı")
+            return
+        self._popup.hide()
+        self._dialog_open = True
+        try:
+            dialog = ImageEditorDialog(image)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            result = dialog.result_image
+            dialog.deleteLater()  # geri alma yığınındaki görseller bellekte kalmasın
+        finally:
+            self._dialog_open = False
+        if not accepted or result is None:
+            return
+        # Asıl görsel yerinde kalır; düzenlenen kopya ayrı bir öğe olur.
+        self._record_image(result, APP_NAME)
+        write_image_to_clipboard(result)
+        return_focus(self._prev_window, send_paste=False)
+        self._tray.showMessage(
+            APP_NAME,
+            "Düzenlenen görsel clipboard'a kopyalandı ve geçmişe eklendi.",
+            QSystemTrayIcon.MessageIcon.Information,
+            4000,
+        )
+
+    def _save_image(self, item_id: int) -> None:
+        """Ctrl+Shift+S: görseli kullanıcının seçtiği yere PNG dosyası olarak kaydeder."""
+        item = self._repo.get(item_id)
+        if item is None or item.category is not Category.IMAGE or self._dialog_open:
+            return
+        if not item.image_path or not Path(item.image_path).is_file():
+            self._popup.show_status("Görsel dosyası okunamadı")
+            return
+        folder = self._save_dir or QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.PicturesLocation
+        )
+        self._popup.hide()
+        self._dialog_open = True
+        try:
+            target, _filter = QFileDialog.getSaveFileName(
+                None,
+                f"{APP_NAME} - Görseli kaydet",
+                str(Path(folder) / default_image_name()),
+                "PNG görseli (*.png)",
+            )
+        finally:
+            self._dialog_open = False
+        if not target:
+            return
+        self._save_image_to(item.image_path, target)
+
+    def _save_image_to(self, source: str, target: str) -> Path | None:
+        path = Path(target)
+        if path.suffix.lower() != ".png":
+            path = path.with_name(path.name + ".png")
+        try:
+            shutil.copyfile(source, path)  # görseller zaten PNG olarak saklanır
+        except OSError as exc:
+            self._notify(f"Görsel kaydedilemedi: {exc}")
+            return None
+        self._save_dir = str(path.parent)
+        self._tray.showMessage(
+            APP_NAME, f"Görsel kaydedildi: {path}", QSystemTrayIcon.MessageIcon.Information, 4000
+        )
+        return path
 
     # ---- OCR ----------------------------------------------------------------
     def _ocr_requested(self, item_id: int) -> None:
@@ -328,7 +437,25 @@ class Controller(QObject):
 
     # ---- tray eylemleri -----------------------------------------------------
     def _set_paused(self, paused: bool) -> None:
-        self._paused = paused
+        self._pause.pause() if paused else self._pause.resume()
+        self._sync_pause()
+
+    def _pause_for(self, seconds: int) -> None:
+        self._pause.pause_for(seconds)
+        self._sync_pause()
+
+    def _set_skip_next(self, armed: bool) -> None:
+        self._pause.skip_next(armed)
+        self._sync_pause()
+
+    def _sync_pause(self) -> None:
+        """Tray'i duraklatma durumuyla eşitler; durum kendiliğinden değişecekse o ana kurulur."""
+        self._tray.set_status(self._pause.status())
+        change = self._pause.next_change()
+        if change is None:
+            self._pause_timer.stop()
+        else:
+            self._pause_timer.start(max(0, int((change - time.time()) * 1000)) + 200)
 
     def _clear_history(self) -> None:
         answer = QMessageBox.question(
@@ -364,6 +491,8 @@ class Controller(QObject):
                 autostart.set_enabled(new.autostart)
         except OSError as exc:
             self._notify(f"Başlangıç ayarı değiştirilemedi: {exc}")
+        if (new.theme, new.animations) != (old.theme, old.animations):
+            self._popup.set_theme(new.theme, new.animations)
         for category in Category:
             self._repo.enforce_limit(category, new.limit_for(category))
         self._maintain()

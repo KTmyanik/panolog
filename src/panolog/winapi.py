@@ -162,3 +162,64 @@ def acquire_single_instance(name: str) -> bool:
     handle = CreateMutexW(None, False, name)
     acquire_single_instance._handle = handle  # süreç boyunca açık kalsın
     return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+
+
+# ---- pencere arkası bulanıklığı (buzlu cam) -----------------------------------
+class _ACCENT_POLICY(ctypes.Structure):
+    _fields_ = [
+        ("AccentState", ctypes.c_int),
+        ("AccentFlags", ctypes.c_int),
+        ("GradientColor", ctypes.c_uint),
+        ("AnimationId", ctypes.c_int),
+    ]
+
+
+class _WINCOMPATTRDATA(ctypes.Structure):
+    _fields_ = [
+        ("Attribute", ctypes.c_int),
+        ("Data", ctypes.c_void_p),
+        ("SizeOfData", ctypes.c_size_t),
+    ]
+
+
+_WCA_ACCENT_POLICY = 19
+_ACCENT_DISABLED, _ACCENT_ACRYLIC = 0, 4
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+CORNER_DEFAULT, CORNER_SQUARE, CORNER_ROUND = 0, 1, 2
+
+
+def set_backdrop_blur(hwnd: int, enabled: bool) -> bool:
+    """Pencerenin arkasında kalanı bulanık gösterir (Windows'un "acrylic" efekti).
+
+    Belgelenmemiş ama yaygın kullanılan SetWindowCompositionAttribute çağrısıdır; bu yüzden
+    her hata yutulur ve False döner, çağıran taraf opak zemine geri düşer.
+    """
+    try:
+        func = user32.SetWindowCompositionAttribute
+        func.argtypes = [wintypes.HWND, ctypes.POINTER(_WINCOMPATTRDATA)]
+        func.restype = wintypes.BOOL
+        # GradientColor ABGR: neredeyse saydam; asıl rengi pencere kendi çizer.
+        accent = _ACCENT_POLICY(_ACCENT_ACRYLIC if enabled else _ACCENT_DISABLED, 0, 0x01281000, 0)
+        data = _WINCOMPATTRDATA(
+            _WCA_ACCENT_POLICY,
+            ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p),
+            ctypes.sizeof(accent),
+        )
+        return bool(func(wintypes.HWND(hwnd), ctypes.byref(data)))
+    except (AttributeError, OSError, ctypes.ArgumentError):
+        return False
+
+
+def set_window_corners(hwnd: int, preference: int) -> bool:
+    """Windows 11'de pencere köşelerini yuvarlatır/köşeli yapar; eski sürümlerde etkisizdir."""
+    try:
+        value = ctypes.c_int(preference)
+        result = ctypes.WinDLL("dwmapi").DwmSetWindowAttribute(
+            wintypes.HWND(hwnd),
+            _DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(value),
+            ctypes.sizeof(value),
+        )
+        return result == 0
+    except (AttributeError, OSError, ctypes.ArgumentError):
+        return False

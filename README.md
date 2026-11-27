@@ -75,11 +75,89 @@ Bilinmesi gerekenler:
 | `Ctrl+P` | Sabitle / sabitlemeyi kaldır |
 | `Ctrl+S` | Seçili öğeyi şablon olarak kaydet |
 | `Ctrl+O` | Seçili görseldeki metni çıkar (OCR): Metinler'e ekler ve clipboard'a kopyalar |
+| `Boşluk` | Seçili görseli, metni, linki ya da şablonu büyük önizle / önizlemeyi kapat (arama doluyken `Ctrl+Boşluk`) |
+| `Ctrl+E` | Seçili görseli düzenleyicide aç (kapat, bulanıklaştır, kırp) |
+| `Ctrl+Shift+S` | Seçili görseli PNG dosyası olarak kaydet |
 | `Ctrl+N` / `Ctrl+E` | Şablonlar sekmesinde: yeni şablon / seçili şablonu düzenle |
 | `Delete` | Seçili öğeyi sil |
 | `Esc` | Kapat |
 
-Tray menüsü: Duraklat/Devam et, Geçmişi temizle (sabitlenenler kalır), Şablonlar, Ayarlar, Çıkış.
+Listede bir öğeye sağ tıklayınca aynı işlemler menü olarak da açılır.
+
+Tray menüsü: Duraklat/Devam et, 5 dakika duraklat, Sonraki kopyayı kaydetme, Geçmişi temizle
+(sabitlenenler kalır), Şablonlar, Ayarlar, Çıkış.
+
+### Bir kopyayı geçmişe almadan geçmek
+
+- **Sonraki kopyayı kaydetme:** Tray menüsünden işaretlenir. Bundan sonra kopyalanan ilk şey
+  clipboard'a gider ama geçmişe eklenmez; sonraki kopyalar kendiliğinden yine kaydedilir.
+  İki dakika içinde bir şey kopyalanmazsa işaret kendiliğinden kalkar, böylece unutulup
+  sonraki ilgisiz bir kopyayı yutmaz. Panolog'un kendi yapıştırmaları bu hakkı tüketmez.
+- **5 dakika duraklat:** Kaydetme 5 dakika durur ve süre dolunca kendiliğinden sürer. Menüde
+  kalan süre görünür; "Devam et" ile erken bitirilebilir.
+- **Duraklat:** Elle "Devam et" denene kadar hiçbir şey kaydedilmez.
+
+Bu durumların hepsinde tray ikonu gri olur ve üzerine gelince nedeni yazar.
+
+## Görünüm (temalar)
+
+Ayarlar > Görünüm'den geçmiş penceresinin teması seçilir. Tema yalnızca görünümü değiştirir;
+tuşlar, arama ve yapıştırma her temada aynıdır.
+
+| Tema | Görünüm |
+| --- | --- |
+| Klasik (koyu) | Varsayılan sade koyu liste |
+| Aurora cam | Yavaşça kayan renkler, renk geçişli seçim; Windows izin verirse arkadaki masaüstü bulanık görünür |
+| Kâğıt masa | Mantar pano üzerinde bantlı, hafif eğik notlar; iki sütun, el yazısı |
+| Sert çizgi | Kalın siyah çerçeveler, sert gölgeler, sarı zemin |
+
+- **Aurora cam** arka planı yalnızca pencere açıkken çizilir (saniyede 25 kare). Yavaş bir
+  bilgisayarda Ayarlar > Görünüm > "Hareketli arka plan" kapatılabilir; renkler sabit kalır.
+- Buzlu cam için Windows'un belgelenmemiş bir pencere efekti kullanılır. Efekt reddedilirse
+  (eski Windows sürümü, uzak masaüstü, saydamlık efektleri kapalı) tema opak zeminle çalışır.
+- **Kâğıt masa**'da notlar sabit boydadır; uzun metnin fazlası notun altında kesilir (tamamı
+  için `Boşluk`). Kod gibi görünen metinler eş aralıklı yazıyla, diğerleri el yazısıyla
+  gösterilir. Kaydırma çubuğu gizlidir; fare tekerleği ve ok tuşları kaydırır. `↑` `↓` notları
+  okuma sırasıyla (soldan sağa, yukarıdan aşağıya) gezer.
+- Yazı tipleri Windows'la gelenlerdir (Ink Free, Arial Black, Consolas); uygulamayla font
+  dağıtılmaz. Bulunamazsa Segoe UI kullanılır.
+- Ayarlar ve görsel düzenleyici pencereleri temadan etkilenmez.
+
+## Görsel önizleme ve düzenleme
+
+**Büyük önizleme.** Görseller sekmesinde imleç bir görselin üzerinde yaklaşık yarım saniye
+durunca, pencerenin yanında ekrana sığan büyük hâli açılır; imleç çekilince kapanır. Klavyeyle
+`Boşluk` aynı önizlemeyi açar ve `↑` `↓` ile gezerken seçili görseli izler; ikinci `Boşluk`
+kapatır. Görsel kendi boyutundan büyütülmez, yalnızca sığmıyorsa küçültülür. Önizleme odak
+almaz; yazmaya ve `Enter` ile yapıştırmaya devam edilebilir.
+
+`Boşluk` metinlerde, linklerde ve şablonlarda da çalışır: içeriğin tamamı eş aralıklı yazıyla
+gösterilir (listede yalnızca ilk iki satır görünür). Ekrana sığmayan metin alttan kısaltılır
+ve kaç satırın gösterilmediği yazılır. Maskelenmiş (hassas) öğelerde önizleme de maskelidir.
+İmleçle açılan önizleme yalnızca görsellerdedir.
+
+**Dosyaya kaydetme.** `Ctrl+Shift+S` (ya da sağ tık > PNG olarak kaydet) seçili görseli
+seçtiğiniz yere PNG olarak yazar. Önerilen ad `Panolog <tarih> <saat>.png`, ilk önerilen klasör
+Resimler'dir; oturum boyunca son kullanılan klasör hatırlanır.
+
+**Düzenleyici.** `Ctrl+E` (ya da sağ tık > Düzenle) seçili görseli ayrı bir pencerede açar.
+Bir araç seçilir, fareyle bir alan çizilir; işlem fare bırakılınca uygulanır:
+
+| Araç | Tuş | Ne yapar |
+| --- | --- | --- |
+| Kapat | `K` | Alanı düz siyahla örter (varsayılan araç) |
+| Bulanıklaştır | `B` | Alanı güçlü biçimde bulanıklaştırır |
+| Kırp | `C` | Yalnızca seçilen alan kalır |
+
+`Ctrl+Z` son işlemi geri alır (en çok 30 adım). `Enter` ile kaydedilince düzenlenmiş görsel
+**yeni bir öğe** olarak geçmişe eklenir ve clipboard'a kopyalanır; asıl görsel değişmez. `Esc`
+hiçbir şey kaydetmeden kapatır.
+
+- **Gizli bilgi için "Kapat" kullanın.** Bulanıklaştırılmış ya da pikselleştirilmiş yazı,
+  yazı tipi bilindiğinde geri çıkarılabilir; kart numarası, TCKN, parola gibi veriler için
+  güvenli değildir. "Kapat" alandaki pikselleri tamamen siler, geri getirilemez.
+- Asıl (düzenlenmemiş) görsel geçmişte kalır. Onu da istemiyorsanız `Delete` ile silin.
+- Ok, yazı ve serbest çizim yoktur.
 
 ## Şablonlar
 

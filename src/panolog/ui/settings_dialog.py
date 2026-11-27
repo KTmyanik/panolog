@@ -29,6 +29,7 @@ from ..ocr import pipeline
 from ..settings import Settings
 from .icons import app_icon
 from .popup import TABS
+from .themes import THEMES, get_theme
 
 
 def ocr_status_text() -> str:
@@ -54,7 +55,8 @@ class SettingsDialog(QDialog):
             tabs.addTab(widget, title)
             return QVBoxLayout(widget)
 
-        general, ocr_page, privacy_page = page("Genel"), page("OCR"), page("Gizlilik")
+        general, look_page = page("Genel"), page("Görünüm")
+        ocr_page, privacy_page = page("OCR"), page("Gizlilik")
 
         # Geçmiş
         history = QGroupBox("Geçmiş")
@@ -93,6 +95,26 @@ class SettingsDialog(QDialog):
         form.addRow(self._autostart)
         general.addWidget(behavior)
         general.addStretch(1)
+
+        # Görünüm
+        look_box = QGroupBox("Geçmiş penceresinin görünümü")
+        look_form = QFormLayout(look_box)
+        self._theme = QComboBox()
+        for theme in THEMES.values():
+            self._theme.addItem(theme.label, theme.key)
+        self._theme.setCurrentIndex(max(0, self._theme.findData(get_theme(settings.theme).key)))
+        look_form.addRow("Tema:", self._theme)
+        self._animations = QCheckBox("Hareketli arka plan (Aurora cam)")
+        self._animations.setChecked(settings.animations)
+        look_form.addRow(self._animations)
+        look_note = QLabel(
+            "Tema yalnızca görünümü değiştirir; tuşlar ve davranış aynı kalır. Hareketli arka "
+            "plan yalnızca pencere açıkken çizilir; bilgisayarı yoruyorsa kapatabilirsiniz."
+        )
+        look_note.setWordWrap(True)
+        look_form.addRow(look_note)
+        look_page.addWidget(look_box)
+        look_page.addStretch(1)
 
         # OCR
         ocr_box = QGroupBox("Görsellerden metin okuma (OCR)")
@@ -192,6 +214,8 @@ class SettingsDialog(QDialog):
         s.detect_email = self._email.isChecked()
         s.detect_phone = self._phone.isChecked()
         s.ocr_auto = self._ocr_auto.isChecked()
+        s.theme = self._theme.currentData()
+        s.animations = self._animations.isChecked()
         s.excluded_apps = [
             ln.strip().lower() for ln in self._excluded.toPlainText().splitlines() if ln.strip()
         ]

@@ -4,26 +4,41 @@ from __future__ import annotations
 import os
 import time
 
-from PySide6.QtCore import QEvent, QFileInfo, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QCursor, QFontMetrics, QGuiApplication, QKeyEvent, QPixmap
+from PySide6.QtCore import QEvent, QFileInfo, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QCursor, QFontMetrics, QGuiApplication, QKeyEvent, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QFileIconProvider,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QTabBar,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import winapi
+from .. import APP_NAME, winapi
 from ..classifier import Category
 from ..snippets import Snippet, SnippetRepository
 from ..storage.models import FileRef, Item
 from ..storage.repository import Repository
 from .formatting import app_label, files_detail, files_title, preview_lines, relative_time
+from ..ocr.merge import looks_like_code
+from .preview import ImagePreview
+from .themes import (
+    DEFAULT_THEME,
+    ROLE_PIXMAP,
+    ROLE_SEED,
+    Backdrop,
+    CardDelegate,
+    NoteDelegate,
+    Theme,
+    get_theme,
+    note_content_size,
+)
 
 TABS: list[tuple[Category, str]] = [
     (Category.IMAGE, "Görseller"),
@@ -55,34 +70,24 @@ def _file_pixmap(ref: FileRef) -> QPixmap:
 
 _WIDTH, _HEIGHT = 480, 560
 _THUMB_H = 64
+_HOVER_PREVIEW_MS = 450  # imleç bir görselin üzerinde bu kadar durunca önizleme açılır
 
-_STYLE = """
-#popup { background: #1f2127; border: 1px solid #3a3d46; border-radius: 10px; }
-QLabel { color: #e6e8ec; }
-QLineEdit { background: #2a2d35; color: #e6e8ec; border: 1px solid #3a3d46;
-            border-radius: 6px; padding: 6px 8px; selection-background-color: #2f7de1; }
-QLineEdit:focus { border-color: #2f7de1; }
-QTabBar::tab { color: #a9aeb8; padding: 6px 10px; border: none;
-               border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { color: #ffffff; border-bottom-color: #2f7de1; }
-QListWidget { background: transparent; border: none; outline: none; }
-QListWidget::item { border-radius: 6px; }
-QListWidget::item:selected { background: #2d4a73; }
-QListWidget::item:hover:!selected { background: #282b33; }
-#meta, #hint, #empty { color: #8b909b; }
-#badge { color: #8b909b; background: #2a2d35; border-radius: 4px; }
-#link { color: #7fb4ff; }
-"""
+# "notes" görünümünde ızgara hücresi. İki hücre liste genişliğinden (pencere - 20) biraz dar
+# olmalı; tam sığınca Qt ikinci notu alt satıra atıyor.
+_NOTE_CELL = QSize((_WIDTH - 20 - 4) // 2, 142)
 
 
 class _Row(QWidget):
-    def __init__(self, item: Item, number: int | None, text_width: int) -> None:
+    def __init__(self, item: Item, number: int | None, text_width: int, theme: Theme) -> None:
         super().__init__()
         # Tıklamalar listeye ulaşsın.
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setContentsMargins(*theme.row_margins)
         lay.setSpacing(10)
+        wrap = theme.rows == "notes"
+        if wrap and item.pinned:
+            text_width -= 24  # raptiye işaretine yer kalsın
 
         badge = QLabel(str(number) if number else "")
         badge.setObjectName("badge" if number else "")
@@ -120,6 +125,7 @@ class _Row(QWidget):
                 meta_parts.append(files_detail(item.files))
         elif item.category is Category.IMAGE:
             thumb = QLabel()
+            thumb.setObjectName("thumb")
             pix = QPixmap(item.thumb_path) if item.thumb_path else QPixmap()
             if not pix.isNull():
                 thumb.setPixmap(
@@ -132,7 +138,7 @@ class _Row(QWidget):
                 )
             else:
                 thumb.setText("(önizleme yok)")
-            body.addWidget(thumb)
+            body.addWidget(thumb, 0, Qt.AlignmentFlag.AlignLeft)
             if item.width and item.height:
                 meta_parts.append(f"{item.width}×{item.height}")
             if item.ocr_text:
@@ -154,13 +160,25 @@ class _Row(QWidget):
                 main.setObjectName("link")
             fm = QFontMetrics(main.font())
             shown = item.masked_text if item.masked_text is not None else item.text
-            lines = preview_lines(shown or "")
-            main.setText(
-                "\n".join(
-                    fm.elidedText(ln, Qt.TextElideMode.ElideRight, text_width) for ln in lines
+            lines = preview_lines(shown or "", max_lines=theme.text_lines)
+            if item.category is Category.TEXT and any(looks_like_code(ln) for ln in lines):
+                main.setObjectName("code")  # bazı temalar kodu eş aralıklı yazıyla gösterir
+                main.ensurePolished()
+            if wrap:
+                main.setWordWrap(True)
+                main.setFixedWidth(text_width)
+                # Uzun metin notun altındaki damganın üstüne taşmasın; fazlası kesilir.
+                main.setFixedHeight(note_content_size(_NOTE_CELL).height() - 26)
+                main.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                main.setText("\n".join(lines))
+                body.addWidget(main, 1)
+            else:
+                main.setText(
+                    "\n".join(
+                        fm.elidedText(ln, Qt.TextElideMode.ElideRight, text_width) for ln in lines
+                    )
                 )
-            )
-            body.addWidget(main)
+                body.addWidget(main)
 
         meta_parts.append(relative_time(item.copied_at))
         if app := app_label(item.source_app):
@@ -171,9 +189,18 @@ class _Row(QWidget):
                 meta_parts.append(f"🔒 {left} sn sonra silinecek")
             else:
                 meta_parts.append("🔒 hassas")
-        meta = QLabel("  ·  ".join(meta_parts))
+        meta = QLabel()
         meta.setObjectName("meta")
         meta.setTextFormat(Qt.TextFormat.PlainText)
+        if wrap:
+            meta.setFixedWidth(text_width)
+            meta.setText(" · ".join(reversed(meta_parts)).upper())  # damga: önce uygulama ve zaman
+        else:
+            meta.setText(
+                QFontMetrics(meta.font()).elidedText(
+                    "  ·  ".join(meta_parts), Qt.TextElideMode.ElideRight, text_width
+                )
+            )
         body.addWidget(meta)
         lay.addLayout(body, 1)
 
@@ -183,11 +210,11 @@ class _Row(QWidget):
 
 
 class _SnippetRow(QWidget):
-    def __init__(self, snippet: Snippet, number: int | None, text_width: int) -> None:
+    def __init__(self, snippet: Snippet, number: int | None, text_width: int, theme: Theme) -> None:
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setContentsMargins(*theme.row_margins)
         lay.setSpacing(10)
         badge = QLabel(str(number) if number else "")
         badge.setObjectName("badge" if number else "")
@@ -222,13 +249,14 @@ class _SnippetRow(QWidget):
 
 
 _HINT_HISTORY = (
-    "Enter yapıştır · Shift+Enter düz metin · 1-9 hızlı seç · Ctrl+P sabitle · "
+    "Enter yapıştır · Shift+Enter düz metin · Boşluk önizle · Ctrl+P sabitle · "
     "Ctrl+S şablon yap · Del sil"
 )
 _HINT_IMAGES = (
-    "Enter yapıştır · 1-9 hızlı seç · Ctrl+O metne çevir (OCR) · Ctrl+P sabitle · Del sil"
+    "Enter yapıştır · Boşluk büyüt · Ctrl+E düzenle · Ctrl+O metne çevir · "
+    "Ctrl+P sabitle · Del sil"
 )
-_HINT_SNIPPETS = "Enter yapıştır · 1-9 hızlı seç · Ctrl+N yeni · Ctrl+E düzenle · Del sil"
+_HINT_SNIPPETS = "Enter yapıştır · Boşluk önizle · Ctrl+N yeni · Ctrl+E düzenle · Del sil"
 _HINT_CONFIRM = "Şablonu silmek için Delete'e tekrar basın"
 
 
@@ -238,6 +266,8 @@ class Popup(QWidget):
     saveAsSnippetRequested = Signal(int)  # geçmiş öğesinden şablon oluştur
     editSnippetRequested = Signal(int)  # şablon id; 0 = yeni şablon
     ocrRequested = Signal(int)  # görseldeki metni çıkar
+    editImageRequested = Signal(int)  # görseli düzenleyicide aç
+    saveImageRequested = Signal(int)  # görseli PNG dosyası olarak kaydet
     changed = Signal()
 
     def __init__(self, repo: Repository, snippets: SnippetRepository) -> None:
@@ -254,18 +284,30 @@ class Popup(QWidget):
         self._status: str | None = None  # ipucu satırında geçici durum mesajı
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(_WIDTH, _HEIGHT)
-        self.setStyleSheet(_STYLE)
+        self._theme = get_theme(DEFAULT_THEME)
 
-        frame = QWidget(self)
-        frame.setObjectName("popup")
-        frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        frame = self._frame = Backdrop(self)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(frame)
 
-        lay = QVBoxLayout(frame)
+        lay = self._layout = QVBoxLayout(frame)
         lay.setContentsMargins(10, 10, 10, 8)
         lay.setSpacing(6)
+
+        # Uygulama adı ve kayıt sayısı; yalnızca bunu isteyen temalarda görünür.
+        self._brand = QWidget()
+        brand_lay = QHBoxLayout(self._brand)
+        brand_lay.setContentsMargins(2, 0, 2, 0)
+        brand_name = QLabel(APP_NAME.upper())
+        brand_name.setObjectName("brand")
+        brand_lay.addWidget(brand_name)
+        brand_lay.addStretch(1)
+        self._count = QLabel()
+        self._count.setObjectName("count")
+        brand_lay.addWidget(self._count)
+        self._brand.hide()
+        lay.addWidget(self._brand)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Aramak için yazın…")
@@ -292,7 +334,30 @@ class Popup(QWidget):
         self._list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self._list.setSpacing(1)
         self._list.itemClicked.connect(lambda it: self._paste_row(self._list.row(it), False))
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._show_menu)
+        self._list.currentRowChanged.connect(self._on_row_changed)
+        self._list.verticalScrollBar().valueChanged.connect(lambda _v: self._hide_preview())
+        self._viewport = self._list.viewport()
+        self._viewport.setMouseTracking(True)
+        self._viewport.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self._plain_delegate = self._list.itemDelegate()
+        self._card_delegate = CardDelegate(self._list)
+        self._note_delegate = NoteDelegate(self._list)
+        frame.set_shadowed([self._search])
+        self._viewport.installEventFilter(self)
         lay.addWidget(self._list, 1)
+
+        # Büyük önizleme: imleç görselin üzerinde durunca ya da Boşluk ile açılır.
+        self._preview = ImagePreview()
+        self._preview_pinned = False  # Boşluk ile açıldı: seçimi izler, imleçle kapanmaz
+        self._hover_row = -1
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(_HOVER_PREVIEW_MS)
+        self._hover_timer.timeout.connect(self._show_hover_preview)
+        self._menu_open = False
+        self._refreshing = False
 
         self._empty = QLabel()
         self._empty.setObjectName("empty")
@@ -311,11 +376,57 @@ class Popup(QWidget):
         self._tick = QTimer(self)
         self._tick.setInterval(1000)
         self._tick.timeout.connect(self._on_tick)
+        self.set_theme(DEFAULT_THEME)
 
     def _on_tick(self) -> None:
         if any(getattr(i, "expires_at", None) is not None for i in self._items):
             self._repo.purge_expired()
             self.refresh()
+
+    # ---- tema ---------------------------------------------------------------
+    @property
+    def theme(self) -> Theme:
+        return self._theme
+
+    def set_theme(self, key: str | None, animate: bool = True) -> None:
+        """Görünümü değiştirir. Davranış ve tuşlar her temada aynıdır."""
+        theme = self._theme = get_theme(key)
+        self.setStyleSheet(theme.qss)
+        self._preview.setStyleSheet(theme.preview_qss)
+        self._frame.set_theme(theme, animate)
+        self._apply_window_effects()
+        self._layout.setSpacing(theme.spacing)
+        self._brand.setVisible(theme.brand)
+        notes = theme.rows == "notes"
+        self._list.setFlow(QListView.Flow.LeftToRight if notes else QListView.Flow.TopToBottom)
+        self._list.setWrapping(notes)
+        self._list.setResizeMode(QListView.ResizeMode.Adjust)
+        self._list.setGridSize(_NOTE_CELL if notes else QSize())
+        # Notlarda kaydırma çubuğu gizlenir (tekerlek ve ok tuşları yine kaydırır); çubuk
+        # genişliği yiyip ikinci sütunu düşürmesin.
+        self._list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff if notes else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._list.setSpacing(0 if theme.rows != "list" else 1)
+        self._list.setItemDelegate(
+            {"cards": self._card_delegate, "notes": self._note_delegate}.get(
+                theme.rows, self._plain_delegate
+            )
+        )
+        self.refresh()
+
+    def _apply_window_effects(self) -> None:
+        """Temanın istediği Windows pencere efektlerini (buzlu cam, köşeler) uygular."""
+        theme = self._theme
+        glass = False
+        if QGuiApplication.platformName() == "windows":
+            hwnd = int(self.winId())
+            glass = winapi.set_backdrop_blur(hwnd, theme.glass) and theme.glass
+            winapi.set_window_corners(
+                hwnd, winapi.CORNER_ROUND if glass else winapi.CORNER_DEFAULT
+            )
+        self._frame.glass = glass
+        self._frame.update()
 
     def showEvent(self, event) -> None:  # noqa: N802
         self._tick.start()
@@ -323,6 +434,10 @@ class Popup(QWidget):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._tick.stop()
+        self._hover_row = -1
+        self._hover_timer.stop()
+        self._preview_pinned = False
+        self._preview.forget()
         super().hideEvent(event)
 
     # ---- açma / kapama ------------------------------------------------------
@@ -344,7 +459,11 @@ class Popup(QWidget):
         self._search.setFocus()
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
-        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+        if (
+            event.type() == QEvent.Type.ActivationChange
+            and not self.isActiveWindow()
+            and not self._menu_open
+        ):
             self.hide()
         super().changeEvent(event)
 
@@ -378,21 +497,28 @@ class Popup(QWidget):
         query = self._search.text()
         snippets_tab = self.on_snippets_tab()
         self._confirm_delete = None
+        self._refreshing = True  # liste yeniden kurulurken seçim değişimleri önizlemeyi kapatmasın
         self._hint.setText(self._status or self._default_hint())
         if snippets_tab:
             self._items = self._snippets.list(query)
         else:
             self._items = self._repo.list_items(self.current_category(), query)
         self._list.clear()
-        text_width = _WIDTH - 110
-        for i, item in enumerate(self._items):
-            number = i + 1 if i < 9 else None
-            row_cls = _SnippetRow if snippets_tab else _Row
-            row = row_cls(item, number, text_width)
-            lw = QListWidgetItem()
-            lw.setSizeHint(QSize(0, row.sizeHint().height()))
-            self._list.addItem(lw)
-            self._list.setItemWidget(lw, row)
+        theme = self._theme
+        self._count.setText(f"{len(self._items)} KAYIT")
+        row_cls = _SnippetRow if snippets_tab else _Row
+        if theme.rows == "notes":
+            self._fill_notes(row_cls)
+        else:
+            extra = theme.row_margins[0] + theme.row_margins[2] - 16
+            text_width = _WIDTH - 110 - extra
+            for i, item in enumerate(self._items):
+                number = i + 1 if i < 9 else None
+                row = row_cls(item, number, text_width, theme)
+                lw = QListWidgetItem()
+                lw.setSizeHint(QSize(0, row.sizeHint().height()))
+                self._list.addItem(lw)
+                self._list.setItemWidget(lw, row)
         has = bool(self._items)
         self._list.setVisible(has)
         self._empty.setVisible(not has)
@@ -405,10 +531,155 @@ class Popup(QWidget):
                 self._empty.setText("Bu kategoride henüz öğe yok")
         else:
             self._list.setCurrentRow(min(max(keep, 0), len(self._items) - 1))
+        self._refreshing = False
+        self._hover_row = -1
+        self._sync_preview()
+
+    def _fill_notes(self, row_cls) -> None:
+        """Not görünümü: her satır bir görüntüye çizilir; eğik notu NoteDelegate boyar."""
+        theme = self._theme
+        size = note_content_size(_NOTE_CELL)
+        margins = theme.row_margins
+        text_width = size.width() - margins[0] - margins[2] - 30  # numara rozeti + boşluk
+        ratio = self.devicePixelRatioF()
+        for i, item in enumerate(self._items):
+            row = row_cls(item, i + 1 if i < 9 else None, text_width, theme)
+            row.setStyleSheet(theme.row_qss)
+            row.setFixedSize(size)
+            row.ensurePolished()
+            row.layout().activate()
+            pixmap = QPixmap(size * ratio)
+            pixmap.setDevicePixelRatio(ratio)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            row.render(pixmap, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+            row.deleteLater()
+            lw = QListWidgetItem()
+            lw.setSizeHint(_NOTE_CELL)
+            lw.setData(ROLE_PIXMAP, pixmap)
+            lw.setData(ROLE_SEED, int(item.id))
+            self._list.addItem(lw)
 
     def _selected(self):
         row = self._list.currentRow()
         return self._items[row] if 0 <= row < len(self._items) else None
+
+    # ---- büyük önizleme -----------------------------------------------------
+    def _image_at(self, row: int) -> Item | None:
+        if self.on_snippets_tab() or not 0 <= row < len(self._items):
+            return None
+        item = self._items[row]
+        return item if item.category is Category.IMAGE and item.image_path else None
+
+    def _text_at(self, row: int) -> str | None:
+        """Satırın önizlenecek metni: metin/link öğesi ya da şablon içeriği."""
+        if not 0 <= row < len(self._items):
+            return None
+        item = self._items[row]
+        if self.on_snippets_tab():
+            return item.content
+        if item.category in (Category.TEXT, Category.LINK):
+            # Maskelenmiş (hassas) öğenin asıl metni önizlemede de gösterilmez.
+            return item.masked_text if item.masked_text is not None else item.text
+        return None
+
+    def _can_preview(self, row: int) -> bool:
+        return self._image_at(row) is not None or bool(self._text_at(row))
+
+    def _show_preview(self, row: int) -> bool:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        item = self._image_at(row)
+        if item is not None:
+            return self._preview.show_image(item.image_path, self.frameGeometry(), area)
+        text = self._text_at(row)
+        if text:
+            return self._preview.show_text(text, self.frameGeometry(), area)
+        self._preview.hide()
+        return False
+
+    def _hide_preview(self) -> None:
+        self._hover_row = -1
+        self._hover_timer.stop()
+        self._preview_pinned = False
+        self._preview.hide()
+
+    def _toggle_preview(self) -> None:
+        if self._preview_pinned and self._preview.isVisible():
+            self._hide_preview()
+            return
+        self._hover_timer.stop()
+        self._preview_pinned = self._show_preview(self._list.currentRow())
+        if not self._preview_pinned and self._image_at(self._list.currentRow()) is not None:
+            self.show_status("Görsel dosyası okunamadı")
+
+    def _on_row_changed(self, _row: int) -> None:
+        if not self._refreshing:
+            self._sync_preview()
+
+    def _sync_preview(self) -> None:
+        """Liste ya da seçim değişti: sabit önizleme seçimi izler, imleçle açılan kapanır."""
+        if self._preview_pinned:
+            self._preview_pinned = self._show_preview(self._list.currentRow())
+        elif self._preview.isVisible():
+            self._hide_preview()
+
+    def _hover(self, pos: QPoint | None) -> None:
+        row = self._list.row(self._list.itemAt(pos)) if pos is not None else -1
+        if self._image_at(row) is None:
+            row = -1
+        if row == self._hover_row:
+            return
+        self._hover_row = row
+        self._hover_timer.stop()
+        if self._preview_pinned:
+            return
+        if row < 0:
+            self._preview.hide()
+        elif self._preview.isVisible():
+            self._show_preview(row)  # zaten açık: komşu görsele beklemeden geç
+        else:
+            self._hover_timer.start()
+
+    def _show_hover_preview(self) -> None:
+        if self.isVisible() and not self._preview_pinned:
+            self._show_preview(self._hover_row)
+
+    # ---- sağ tık menüsü -----------------------------------------------------
+    def _show_menu(self, pos: QPoint) -> None:
+        row = self._list.row(self._list.itemAt(pos))
+        if not 0 <= row < len(self._items):
+            return
+        self._list.setCurrentRow(row)
+        item = self._items[row]
+        self._hover_timer.stop()
+        menu = QMenu(self)
+        menu.addAction("Yapıştır", lambda: self._paste_row(row, False))
+        if not self.on_snippets_tab() and item.category is Category.IMAGE:
+            menu.addAction("Büyüt\tBoşluk", self._toggle_preview)
+            menu.addAction("Düzenle…\tCtrl+E", lambda: self.editImageRequested.emit(item.id))
+            menu.addAction(
+                "PNG olarak kaydet…\tCtrl+Shift+S", lambda: self.saveImageRequested.emit(item.id)
+            )
+            menu.addAction("Metne çevir (OCR)\tCtrl+O", lambda: self.ocrRequested.emit(item.id))
+        elif self._text_at(row):
+            menu.addAction("Önizle\tBoşluk", self._toggle_preview)
+        if self.on_snippets_tab():
+            menu.addAction("Düzenle…\tCtrl+E", lambda: self.editSnippetRequested.emit(item.id))
+        else:
+            menu.addAction(
+                "Sabitlemeyi kaldır\tCtrl+P" if item.pinned else "Sabitle\tCtrl+P", self._toggle_pin
+            )
+        menu.addSeparator()
+        menu.addAction("Sil\tDel", self._delete_selected)
+        # Menü açıkken popup etkinliğini yitirebilir; bu yüzden kendini kapatmamalı.
+        self._menu_open = True
+        try:
+            menu.exec(self._list.viewport().mapToGlobal(pos))
+        finally:
+            self._menu_open = False
+        if self.isVisible():
+            self.activateWindow()
+            self._search.setFocus()
 
     def _move(self, step: int) -> None:
         n = len(self._items)
@@ -460,6 +731,14 @@ class Popup(QWidget):
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self._search and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
+        # Arama kutusunun filtresi liste oluşmadan kurulur; o ana kadar _list yoktur.
+        if obj is getattr(self, "_viewport", None):
+            # Yalnızca gerçek fare hareketi sayılır: pencere imlecin altında açıldığında
+            # kullanıcı istemeden önizleme çıkmasın.
+            if event.type() == QEvent.Type.MouseMove:
+                self._hover(event.position().toPoint())
+            elif event.type() == QEvent.Type.Leave:
+                self._hover(None)
         return super().eventFilter(obj, event)
 
     def _handle_key(self, e: QKeyEvent) -> bool:
@@ -519,6 +798,25 @@ class Popup(QWidget):
         elif key == K.Key_E and ctrl and snippets_tab:
             if item := self._selected():
                 self.editSnippetRequested.emit(item.id)
+        elif key == K.Key_E and ctrl:
+            item = self._selected()
+            if item is not None and item.category is Category.IMAGE:
+                self.editImageRequested.emit(item.id)
+            elif item is not None:
+                self.show_status("Düzenleme yalnızca görsellerde çalışır")
+        elif key == K.Key_Space and (ctrl or (no_mod and empty)):
+            # Arama kutusu doluyken Boşluk aramaya yazılır; Ctrl+Boşluk her zaman önizler.
+            if not self._can_preview(self._list.currentRow()):
+                return False
+            self._toggle_preview()
+        elif key == K.Key_S and mods == (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        ):
+            item = None if snippets_tab else self._selected()
+            if item is not None and item.category is Category.IMAGE:
+                self.saveImageRequested.emit(item.id)
+            elif item is not None:
+                self.show_status("Dosyaya kaydetme yalnızca görsellerde çalışır")
         else:
             return False
         return True

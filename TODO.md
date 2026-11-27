@@ -9,6 +9,11 @@
 - [x] Aşama 5: OCR
 - [x] Aşama 6: PyInstaller paketleme, README'nin tamamlanması, şifreleme değerlendirmesi
 - [x] OCR iyileştirmesi: yerel OCR modeli (kod/numara) + Windows Türkçe motoru, otomatik birleştirme
+- [x] Görsellerde büyük önizleme (imleç / Boşluk) ve düzenleyici: kapatma, bulanıklaştırma, kırpma
+      (aşağıdaki "Hızlı görsel düzenleme" maddesinin ok/kutu çizme kısmı yapılmadı)
+- [x] Metin/link/şablon önizlemesi (Boşluk), "Sonraki kopyayı kaydetme" ve 5 dakika duraklatma,
+      görseli PNG dosyası olarak kaydetme (Ctrl+Shift+S)
+- [x] Seçilebilir temalar: Klasik, Aurora cam, Kâğıt masa, Sert çizgi (Ayarlar > Görünüm)
 
 ## Yapılacaklar listesi (ilk sürüme dahil DEĞİL, sonraki aşamalar)
 ### Aşama 2: Günlük kullanım hızlandırıcıları

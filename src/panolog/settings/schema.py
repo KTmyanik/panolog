@@ -37,6 +37,9 @@ class Settings:
     # Açıksa her yeni görsel (ve geçmişteki okunmamışlar) arka planda OCR'lanır; görseller
     # içlerindeki metinle aranabilir olur. Kapalıyken OCR yalnızca Ctrl+O ile çalışır.
     ocr_auto: bool = False
+    # Geçmiş penceresinin görünümü (ui/themes.py) ve hareketli arka planların açık olması.
+    theme: str = "classic"
+    animations: bool = True
 
     def limit_for(self, category: Category) -> int:
         return int(self.limits.get(category.value, DEFAULT_LIMIT))

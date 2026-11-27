@@ -388,7 +388,14 @@ class Controller(QObject):
             return
         # {pano}: şablon seçildiği andaki clipboard metni
         current = QGuiApplication.clipboard().text()
-        write_text_to_clipboard(expand(snippet.content, clipboard_text=current))
+        if snippet.is_image:
+            image = QImage.fromData(snippet.image)
+            if image.isNull():
+                self._notify("Şablon görseli okunamadı.")
+                return
+            write_image_to_clipboard(image)
+        else:
+            write_text_to_clipboard(expand(snippet.content, clipboard_text=current))
         return_focus(self._prev_window, send_paste=self._settings.auto_paste)
         self._popup.hide()
 
@@ -396,13 +403,19 @@ class Controller(QObject):
         item = self._repo.get(item_id)
         if item is None:
             return
+        if item.category is Category.IMAGE:
+            # Görsel (ör. taranmış imza) çizim alanına gelir; üzerine çizilip kaydedilebilir.
+            image = QImage(item.image_path) if item.image_path else QImage()
+            if image.isNull():
+                self._popup.show_status("Görsel dosyası okunamadı")
+                return
+            self._run_snippet_editor(initial_image=image)
+            return
         if item.category is Category.FILE:
             content = "\n".join(f.path for f in item.files)
         else:
             content = item.text or ""
         if not content.strip():
-            self._popup.hide()
-            self._notify("Görseller şablon olarak kaydedilemez; şablonlar yalnızca metindir.")
             return
         self._run_snippet_editor(initial_content=content)
 
@@ -412,13 +425,17 @@ class Controller(QObject):
             return
         self._run_snippet_editor(snippet=snippet)
 
-    def _run_snippet_editor(self, snippet=None, initial_content: str = "") -> None:
+    def _run_snippet_editor(
+        self, snippet=None, initial_content: str = "", initial_image: QImage | None = None
+    ) -> None:
         if self._dialog_open:
             return
         self._popup.hide()
         self._dialog_open = True
         try:
-            dialog = SnippetEditDialog(self._snippets, snippet, initial_content)
+            dialog = SnippetEditDialog(
+                self._snippets, snippet, initial_content, initial_image=initial_image
+            )
             dialog.show()
             dialog.raise_()
             dialog.activateWindow()

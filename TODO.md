@@ -14,6 +14,8 @@
 - [x] Metin/link/şablon önizlemesi (Boşluk), "Sonraki kopyayı kaydetme" ve 5 dakika duraklatma,
       görseli PNG dosyası olarak kaydetme (Ctrl+Shift+S)
 - [x] Seçilebilir temalar: Klasik, Aurora cam, Kâğıt masa, Sert çizgi (Ayarlar > Görünüm)
+- [x] Görsel şablonlar: şablon penceresinde çizim alanı (ör. imza), dosyadan ya da geçmişteki
+      görselden şablon
 
 ## Yapılacaklar listesi (ilk sürüme dahil DEĞİL, sonraki aşamalar)
 ### Aşama 2: Günlük kullanım hızlandırıcıları

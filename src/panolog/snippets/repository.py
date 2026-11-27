@@ -1,4 +1,4 @@
-"""Şablonların (kalıcı metin parçaları) veri erişim katmanı."""
+"""Şablonların (kalıcı metin parçaları ve görseller) veri erişim katmanı."""
 from __future__ import annotations
 
 import sqlite3
@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..storage.repository import _like_escape, normalize_search
+
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_IMAGE_BYTES = 2 * 1024 * 1024  # görsel şablon üst sınırı; imza birkaç KB tutar
 
 
 class SnippetError(ValueError):
@@ -22,12 +26,18 @@ class Snippet:
     tag: str | None
     created_at: float
     updated_at: float
+    image: bytes | None = None  # doluysa görsel şablondur (PNG); content boştur
+
+    @property
+    def is_image(self) -> bool:
+        return self.image is not None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Snippet":
+        image = row["image"]
         return cls(
             row["id"], row["name"], row["shortcode"], row["content"], row["tag"],
-            row["created_at"], row["updated_at"],
+            row["created_at"], row["updated_at"], bytes(image) if image is not None else None,
         )  # fmt: skip
 
 
@@ -41,11 +51,23 @@ class SnippetRepository:
         self._conn = conn
         self._clock = clock
 
-    def _validate(self, name: str, content: str, shortcode: str | None, own_id: int | None):
+    def _validate(
+        self,
+        name: str,
+        content: str,
+        shortcode: str | None,
+        own_id: int | None,
+        image: bytes | None = None,
+    ):
         name = name.strip()
         if not name:
             raise SnippetError("Şablon adı boş olamaz.")
-        if not content.strip():
+        if image is not None:
+            if not image.startswith(PNG_MAGIC):
+                raise SnippetError("Şablon görseli PNG biçiminde olmalı.")
+            if len(image) > MAX_IMAGE_BYTES:
+                raise SnippetError("Şablon görseli çok büyük (en çok 2 MB).")
+        elif not content.strip():
             raise SnippetError("Şablon içeriği boş olamaz.")
         shortcode = _clean(shortcode)
         if shortcode:
@@ -61,15 +83,23 @@ class SnippetRepository:
         return normalize_search("\n".join(p for p in (name, shortcode, tag, content) if p))
 
     def add(
-        self, name: str, content: str, shortcode: str | None = None, tag: str | None = None
+        self,
+        name: str,
+        content: str,
+        shortcode: str | None = None,
+        tag: str | None = None,
+        image: bytes | None = None,
     ) -> Snippet:
-        name, shortcode = self._validate(name, content, shortcode, None)
+        """`image` verilirse görsel şablon oluşur; o durumda `content` saklanmaz."""
+        name, shortcode = self._validate(name, content, shortcode, None, image)
+        if image is not None:
+            content = ""
         tag, now = _clean(tag), self._clock()
         cur = self._conn.execute(
             "INSERT INTO snippets (name, shortcode, content, tag, search_text, created_at,"
-            " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " updated_at, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (name, shortcode, content, tag, self._search_text(name, shortcode, content, tag),
-             now, now),
+             now, now, image),
         )  # fmt: skip
         self._conn.commit()
         return self.get(cur.lastrowid)  # type: ignore[return-value, arg-type]
@@ -81,14 +111,17 @@ class SnippetRepository:
         content: str,
         shortcode: str | None = None,
         tag: str | None = None,
+        image: bytes | None = None,
     ) -> Snippet:
-        name, shortcode = self._validate(name, content, shortcode, snippet_id)
+        name, shortcode = self._validate(name, content, shortcode, snippet_id, image)
+        if image is not None:
+            content = ""
         tag = _clean(tag)
         self._conn.execute(
             "UPDATE snippets SET name = ?, shortcode = ?, content = ?, tag = ?, search_text = ?,"
-            " updated_at = ? WHERE id = ?",
+            " updated_at = ?, image = ? WHERE id = ?",
             (name, shortcode, content, tag, self._search_text(name, shortcode, content, tag),
-             self._clock(), snippet_id),
+             self._clock(), image, snippet_id),
         )  # fmt: skip
         self._conn.commit()
         return self.get(snippet_id)  # type: ignore[return-value]
@@ -131,22 +164,27 @@ class SnippetRepository:
         """
         added = updated = skipped = 0
         for e in entries:
-            name, content = e["name"], e["content"]
+            name, image = e["name"], e.get("image")
+            content = "" if image is not None else e["content"]
             shortcode, tag = _clean(e.get("shortcode")), _clean(e.get("tag"))
             existing = self.by_shortcode(shortcode) if shortcode else None
             if existing:
-                if (existing.name, existing.content, existing.tag) == (name.strip(), content, tag):
+                same = (existing.name, existing.content, existing.tag, existing.image) == (
+                    name.strip(), content, tag, image,
+                )  # fmt: skip
+                if same:
                     skipped += 1
                 else:
-                    self.update(existing.id, name, content, shortcode, tag)
+                    self.update(existing.id, name, content, shortcode, tag, image)
                     updated += 1
                 continue
             same = self._conn.execute(
-                "SELECT 1 FROM snippets WHERE name = ? AND content = ?", (name.strip(), content)
+                "SELECT 1 FROM snippets WHERE name = ? AND content = ? AND image IS ?",
+                (name.strip(), content, image),
             ).fetchone()
             if same:
                 skipped += 1
             else:
-                self.add(name, content, shortcode, tag)
+                self.add(name, content, shortcode, tag, image)
                 added += 1
         return added, updated, skipped

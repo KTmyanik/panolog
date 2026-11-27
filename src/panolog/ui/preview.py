@@ -105,6 +105,17 @@ class ImagePreview(QWidget):
         """Görseli gösterir; dosya okunamazsa False döner ve pencere kapanır."""
         if path != self._path:
             self._path, self._pixmap = path, QPixmap(path)
+        return self._show_pixmap(popup, screen)
+
+    def show_data(self, data: bytes, key: str, popup: QRect, screen: QRect) -> bool:
+        """Bellekteki bir görseli (ör. görsel şablon) gösterir. `key` önbellek anahtarıdır."""
+        if key != self._path:
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            self._path, self._pixmap = key, pixmap
+        return self._show_pixmap(popup, screen)
+
+    def _show_pixmap(self, popup: QRect, screen: QRect) -> bool:
         if self._pixmap.isNull():
             self._path = None  # dosya henüz yazılıyor olabilir; sonraki denemede yeniden oku
             self.hide()

@@ -1,9 +1,11 @@
 """Şablonların JSON olarak içe/dışa aktarımı."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 
-from .repository import Snippet, SnippetError
+from .repository import MAX_IMAGE_BYTES, PNG_MAGIC, Snippet, SnippetError
 
 FORMAT_VERSION = 1
 
@@ -11,12 +13,30 @@ FORMAT_VERSION = 1
 def dumps(snippets: list[Snippet]) -> str:
     data = {
         "version": FORMAT_VERSION,
-        "snippets": [
-            {"name": s.name, "shortcode": s.shortcode, "content": s.content, "tag": s.tag}
-            for s in snippets
-        ],
+        "snippets": [_entry(s) for s in snippets],
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _entry(s: Snippet) -> dict:
+    entry = {"name": s.name, "shortcode": s.shortcode, "content": s.content, "tag": s.tag}
+    if s.image is not None:  # görsel şablon: PNG verisi base64 olarak
+        entry["image"] = base64.b64encode(s.image).decode("ascii")
+    return entry
+
+
+def _decode_image(value, where: str) -> bytes:
+    if not isinstance(value, str):
+        raise SnippetError(f"{where} 'image' metin (base64) olmalı.")
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise SnippetError(f"{where} 'image' geçerli base64 değil.") from exc
+    if not data.startswith(PNG_MAGIC):
+        raise SnippetError(f"{where} 'image' bir PNG görseli değil.")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise SnippetError(f"{where} 'image' çok büyük (en çok 2 MB).")
+    return data
 
 
 def loads(raw: str) -> list[dict]:
@@ -35,9 +55,15 @@ def loads(raw: str) -> list[dict]:
         name, content = item.get("name"), item.get("content")
         if not isinstance(name, str) or not name.strip():
             raise SnippetError(f"{i}. kayıtta 'name' eksik.")
-        if not isinstance(content, str) or not content.strip():
+        image = None
+        if item.get("image") is not None:
+            image = _decode_image(item["image"], f"{i}. kayıtta ('{name}')")
+            content = ""
+        elif not isinstance(content, str) or not content.strip():
             raise SnippetError(f"{i}. kayıtta ('{name}') 'content' eksik.")
         entry = {"name": name, "content": content}
+        if image is not None:
+            entry["image"] = image
         for key in ("shortcode", "tag"):
             value = item.get(key)
             if value is not None and not isinstance(value, str):

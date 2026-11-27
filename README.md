@@ -73,7 +73,7 @@ Bilinmesi gerekenler:
 | `1`–`9` | İlk 9 öğeyi doğrudan yapıştır (arama doluyken `Alt+1`–`9`) |
 | yazmaya başla | Ara (büyük/küçük harf ve İ/ı duyarsız) |
 | `Ctrl+P` | Sabitle / sabitlemeyi kaldır |
-| `Ctrl+S` | Seçili öğeyi şablon olarak kaydet |
+| `Ctrl+S` | Seçili öğeyi şablon olarak kaydet (görseller çizim alanına gelir) |
 | `Ctrl+O` | Seçili görseldeki metni çıkar (OCR): Metinler'e ekler ve clipboard'a kopyalar |
 | `Boşluk` | Seçili görseli, metni, linki ya da şablonu büyük önizle / önizlemeyi kapat (arama doluyken `Ctrl+Boşluk`) |
 | `Ctrl+E` | Seçili görseli düzenleyicide aç (kapat, bulanıklaştır, kırp) |
@@ -161,8 +161,9 @@ hiçbir şey kaydetmeden kapatır.
 
 ## Şablonlar
 
-Kalıcı metin parçalarıdır: ad, isteğe bağlı kısa kod (ör. `;imza`), içerik ve isteğe bağlı
-etiket. Geçmiş limitinden, otomatik temizlikten ve "Tüm geçmişi sil"den etkilenmezler.
+Kalıcı parçalardır: ad, isteğe bağlı kısa kod (ör. `;imza`), içerik ve isteğe bağlı etiket.
+İçerik ya metindir ya da görsel (ör. elle çizilmiş imza). Geçmiş limitinden, otomatik
+temizlikten ve "Tüm geçmişi sil"den etkilenmezler.
 
 - **Kullanım:** Popup'ta Şablonlar sekmesinden seçilir. Arama ad, kısa kod, etiket ve içerikte
   yapılır; kısa kodu aramayla birebir eşleşen şablon en üste gelir (`;imza` yazıp `Enter`).
@@ -171,8 +172,20 @@ etiket. Geçmiş limitinden, otomatik temizlikten ve "Tüm geçmişi sil"den etk
   bu uygulama bilinçli olarak kanca kurmaz (bkz. Tasarım kararları).
 - **Değişkenler:** `{tarih}` (GG.AA.YYYY), `{saat}` (SS:DD), `{pano}` (şablon seçildiği anda
   clipboard'da olan metin). Bilinmeyen `{…}` ifadeleri olduğu gibi kalır.
-- **Geçmişten şablon:** Herhangi bir metin, link veya dosya öğesi seçiliyken `Ctrl+S`
-  (dosyalarda yollar metin olarak alınır; görseller şablon olamaz).
+- **Geçmişten şablon:** Herhangi bir öğe seçiliyken `Ctrl+S` (dosyalarda yollar metin olarak
+  alınır; görseller çizim alanına gelir ve görsel şablon olur).
+- **Görsel şablon (çizim):** Şablon penceresindeki "Çizim" sekmesinde fareyle ya da
+  dokunmatik ekranda kalemle çizilir. Kalem rengi (siyah, mavi) ve kalınlığı seçilir; "Geri
+  al" (`Ctrl+Z`) ve "Temizle" vardır. "Dosyadan…" taranmış bir imzayı ya da başka bir
+  görseli alana getirir; üzerine çizilebilir. Kaydederken hangi sekme açıksa o saklanır.
+  - Kaydedilen görsel çizimin çevresine kırpılır ve **beyaz zeminlidir**. Saydam zemin
+    bilerek kullanılmadı: clipboard üzerinden yapıştırırken birçok uygulama saydamlığı
+    siyaha çevirir.
+  - Seçilince clipboard'a görsel olarak yazılır ve görsel yapıştırmayı destekleyen yerlere
+    (Word, Outlook, Teams, Paint) eklenir; düz metin kutularına yapışmaz.
+  - Görsel veritabanında durur (en çok 2 MB) ve JSON dışa aktarımına base64 olarak girer.
+    İmzanız bu dosyalarda **şifresiz** saklanır; dışa aktardığınız JSON'u paylaşırken buna
+    dikkat edin.
 - **Silme:** Şablonlar sekmesinde `Delete` iki kez basılınca siler.
 - **Yönetim ve JSON:** Tray > Şablonlar penceresinden ekleme, düzenleme, silme, içe ve dışa
   aktarma. İçe aktarırken kısa kodu zaten kayıtlı olan şablon güncellenir, adı ve içeriği

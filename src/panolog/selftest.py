@@ -38,19 +38,42 @@ def _check_png() -> str:
 
 
 def _check_ui() -> str:
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QColor, QImage
+
+    from . import imaging
+    from .classifier import Category
     from .settings import Settings
     from .snippets import SnippetRepository
     from .storage import Repository, connect
+    from .storage.repository import text_hash
+    from .ui.image_editor import ImageEditorDialog
     from .ui.popup import Popup
     from .ui.settings_dialog import SettingsDialog
+    from .ui.themes import THEMES
     from .ui.tray import Tray
 
     conn = connect(":memory:")
-    popup = Popup(Repository(conn), SnippetRepository(conn))
-    popup.refresh()
+    repo = Repository(conn)
+    for text in ("SELECT 1 FROM dual;", "düz bir metin"):
+        repo.add_item(Category.TEXT, text_hash(text), text=text)
+    popup = Popup(repo, SnippetRepository(conn))
+    # Her tema uygulanıp çizilir: stil sayfası, arka plan ve satır çizimi paketten yükleniyor mu?
+    for key in THEMES:
+        popup.set_theme(key, animate=False)
+        if popup.grab().isNull():
+            raise RuntimeError(f"tema çizilemedi: {key}")
+    popup.set_theme(None)
     SettingsDialog(Settings(), lambda: None)
     Tray()
-    return "pencereler oluşturuldu"
+    image = QImage(64, 48, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#ffffff"))
+    editor = ImageEditorDialog(image)
+    if not editor.session.apply(imaging.cover, QRect(4, 4, 20, 10)):
+        raise RuntimeError("görsel düzenleyici işlem uygulamadı")
+    if editor.session.image.pixel(10, 8) != 0xFF000000:
+        raise RuntimeError("kapatılan alan siyah değil")
+    return f"pencereler oluşturuldu, {len(THEMES)} tema çizildi, düzenleyici çalıştı"
 
 
 def _check_ocr() -> str:

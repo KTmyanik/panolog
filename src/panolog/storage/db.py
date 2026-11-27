@@ -63,6 +63,9 @@ _MIGRATIONS: list[str] = [
     "UPDATE items SET ocr_status = 0 WHERE category = 'image';",
     # v7: yerel OCR modeli eklendi (kod ve numaralar çok daha doğru); aynı nedenle yeniden.
     "UPDATE items SET ocr_status = 0 WHERE category = 'image';",
+    # v8: görsel şablonlar (ör. elle çizilmiş imza). PNG verisi doğrudan veritabanında durur:
+    # küçüktür, kalıcıdır ve geçmişin görsel klasöründeki temizlikten etkilenmemelidir.
+    "ALTER TABLE snippets ADD COLUMN image BLOB;",
 ]
 
 

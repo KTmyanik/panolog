@@ -70,6 +70,7 @@ def _file_pixmap(ref: FileRef) -> QPixmap:
 
 _WIDTH, _HEIGHT = 480, 560
 _THUMB_H = 64
+_SNIPPET_THUMB_H = 44
 _HOVER_PREVIEW_MS = 450  # imleç bir görselin üzerinde bu kadar durunca önizleme açılır
 
 # "notes" görünümünde ızgara hücresi. İki hücre liste genişliğinden (pencere - 20) biraz dar
@@ -230,16 +231,35 @@ class _SnippetRow(QWidget):
         head = snippet.name + (f"   {snippet.shortcode}" if snippet.shortcode else "")
         title.setText(fm.elidedText(head, Qt.TextElideMode.ElideRight, text_width))
         body.addWidget(title)
-        preview = QLabel(
-            fm.elidedText(
-                preview_lines(snippet.content, max_lines=1)[0],
-                Qt.TextElideMode.ElideRight,
-                text_width,
+        if snippet.is_image:
+            # Görsel şablon: koyu temalarda da görünsün diye küçük resim beyaz zeminde durur.
+            thumb = QLabel()
+            thumb.setObjectName("thumb")
+            pix = QPixmap()
+            pix.loadFromData(snippet.image)
+            if not pix.isNull():
+                thumb.setPixmap(
+                    pix.scaled(
+                        min(text_width, pix.width()),
+                        min(_SNIPPET_THUMB_H, pix.height()),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+            else:
+                thumb.setText("(görsel okunamadı)")
+            body.addWidget(thumb, 0, Qt.AlignmentFlag.AlignLeft)
+        else:
+            preview = QLabel(
+                fm.elidedText(
+                    preview_lines(snippet.content, max_lines=1)[0],
+                    Qt.TextElideMode.ElideRight,
+                    text_width,
+                )
             )
-        )
-        preview.setObjectName("meta")
-        preview.setTextFormat(Qt.TextFormat.PlainText)
-        body.addWidget(preview)
+            preview.setObjectName("meta")
+            preview.setTextFormat(Qt.TextFormat.PlainText)
+            body.addWidget(preview)
         if snippet.tag:
             tag = QLabel(f"# {snippet.tag}")
             tag.setObjectName("link")
@@ -576,14 +596,23 @@ class Popup(QWidget):
             return None
         item = self._items[row]
         if self.on_snippets_tab():
-            return item.content
+            return None if item.is_image else item.content
         if item.category in (Category.TEXT, Category.LINK):
             # Maskelenmiş (hassas) öğenin asıl metni önizlemede de gösterilmez.
             return item.masked_text if item.masked_text is not None else item.text
         return None
 
+    def _snippet_image_at(self, row: int) -> Snippet | None:
+        if not self.on_snippets_tab() or not 0 <= row < len(self._items):
+            return None
+        return self._items[row] if self._items[row].is_image else None
+
     def _can_preview(self, row: int) -> bool:
-        return self._image_at(row) is not None or bool(self._text_at(row))
+        return (
+            self._image_at(row) is not None
+            or self._snippet_image_at(row) is not None
+            or bool(self._text_at(row))
+        )
 
     def _show_preview(self, row: int) -> bool:
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -591,6 +620,11 @@ class Popup(QWidget):
         item = self._image_at(row)
         if item is not None:
             return self._preview.show_image(item.image_path, self.frameGeometry(), area)
+        snippet = self._snippet_image_at(row)
+        if snippet is not None:
+            return self._preview.show_data(
+                snippet.image, f"snippet:{snippet.id}:{snippet.updated_at}", self.frameGeometry(), area
+            )
         text = self._text_at(row)
         if text:
             return self._preview.show_text(text, self.frameGeometry(), area)
@@ -661,7 +695,7 @@ class Popup(QWidget):
                 "PNG olarak kaydet…\tCtrl+Shift+S", lambda: self.saveImageRequested.emit(item.id)
             )
             menu.addAction("Metne çevir (OCR)\tCtrl+O", lambda: self.ocrRequested.emit(item.id))
-        elif self._text_at(row):
+        elif self._can_preview(row):
             menu.addAction("Önizle\tBoşluk", self._toggle_preview)
         if self.on_snippets_tab():
             menu.addAction("Düzenle…\tCtrl+E", lambda: self.editSnippetRequested.emit(item.id))

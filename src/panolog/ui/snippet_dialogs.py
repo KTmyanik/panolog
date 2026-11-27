@@ -4,7 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -17,17 +19,23 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from .. import APP_NAME
 from ..snippets import VARIABLES, Snippet, SnippetError, SnippetRepository
 from ..snippets import io_json
+from .draw_canvas import INK_COLORS, PEN_WIDTHS, DrawCanvas, to_png
 from .icons import app_icon
 
 
 class SnippetEditDialog(QDialog):
-    """Yeni şablon oluşturur veya var olanı düzenler; Kaydet'te doğrudan depoya yazar."""
+    """Yeni şablon oluşturur veya var olanı düzenler; Kaydet'te doğrudan depoya yazar.
+
+    Şablon ya metindir ya da görsel (ör. elle çizilmiş imza); hangi sekme açıksa o kaydedilir.
+    """
 
     def __init__(
         self,
@@ -35,6 +43,7 @@ class SnippetEditDialog(QDialog):
         snippet: Snippet | None = None,
         initial_content: str = "",
         parent=None,
+        initial_image: QImage | None = None,
     ) -> None:
         super().__init__(parent)
         self._repo = repo
@@ -57,15 +66,77 @@ class SnippetEditDialog(QDialog):
         form.addRow("Etiket:", self._tag)
         root.addLayout(form)
 
-        root.addWidget(QLabel("İçerik:"))
+        self._tabs = QTabWidget()
+        root.addWidget(self._tabs, 1)
+
+        # Metin
+        text_page = QWidget()
+        text_lay = QVBoxLayout(text_page)
         self._content = QPlainTextEdit(snippet.content if snippet else initial_content)
-        root.addWidget(self._content, 1)
+        text_lay.addWidget(self._content, 1)
         variables = QLabel(
             "Değişkenler: " + ",  ".join(f"{{{k}}} = {v}" for k, v in VARIABLES.items())
         )
         variables.setWordWrap(True)
         variables.setEnabled(False)
-        root.addWidget(variables)
+        text_lay.addWidget(variables)
+        self._tabs.addTab(text_page, "Metin")
+
+        # Çizim
+        draw_page = QWidget()
+        draw_lay = QVBoxLayout(draw_page)
+        bar = QHBoxLayout()
+        self._ink = QComboBox()
+        for label, color in INK_COLORS.items():
+            self._ink.addItem(label, color)
+        self._pen = QComboBox()
+        for label, width in PEN_WIDTHS.items():
+            self._pen.addItem(label, width)
+        self._pen.setCurrentIndex(1)
+        bar.addWidget(QLabel("Kalem:"))
+        bar.addWidget(self._ink)
+        bar.addWidget(self._pen)
+        bar.addStretch(1)
+        self._undo = QPushButton("Geri al")
+        self._clear = QPushButton("Temizle")
+        load = QPushButton("Dosyadan…")
+        load.setToolTip("Taranmış bir imzayı ya da başka bir görseli çizim alanına getirir.")
+        for button in (self._undo, self._clear, load):
+            button.setAutoDefault(False)
+            bar.addWidget(button)
+        draw_lay.addLayout(bar)
+        self._canvas = DrawCanvas()
+        holder = QHBoxLayout()
+        holder.addStretch(1)
+        holder.addWidget(self._canvas)
+        holder.addStretch(1)
+        draw_lay.addLayout(holder)
+        note = QLabel(
+            "Fareyle (ya da dokunmatik ekranda kalemle) çizin. Kaydedilen görsel, çizimin "
+            "çevresine kırpılır ve beyaz zeminlidir; yapıştırınca görsel olarak eklenir."
+        )
+        note.setWordWrap(True)
+        note.setEnabled(False)
+        draw_lay.addWidget(note)
+        draw_lay.addStretch(1)
+        self._tabs.addTab(draw_page, "Çizim")
+
+        self._ink.currentIndexChanged.connect(self._sync_pen)
+        self._pen.currentIndexChanged.connect(self._sync_pen)
+        self._undo.clicked.connect(self._canvas.undo)
+        self._clear.clicked.connect(self._canvas.clear)
+        load.clicked.connect(self._load_file)
+        self._canvas.changed.connect(self._sync_buttons)
+        undo_key = QShortcut(QKeySequence.StandardKey.Undo, self._canvas)
+        undo_key.setContext(Qt.ShortcutContext.WindowShortcut)
+        undo_key.activated.connect(self._undo_if_drawing)
+
+        existing = QImage.fromData(snippet.image) if snippet and snippet.image else initial_image
+        if existing is not None and not existing.isNull():
+            self._canvas.set_base(existing, undoable=False)
+            self._tabs.setCurrentIndex(1)
+        self._sync_pen()
+        self._sync_buttons()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -77,12 +148,55 @@ class SnippetEditDialog(QDialog):
         root.addWidget(buttons)
         self._name.setFocus()
 
+    @property
+    def canvas(self) -> DrawCanvas:
+        return self._canvas
+
+    def show_drawing(self) -> None:
+        self._tabs.setCurrentIndex(1)
+
+    def is_drawing(self) -> bool:
+        return self._tabs.currentIndex() == 1
+
+    def _sync_pen(self) -> None:
+        self._canvas.color = self._ink.currentData()
+        self._canvas.pen_width = float(self._pen.currentData())
+
+    def _sync_buttons(self) -> None:
+        self._undo.setEnabled(self._canvas.can_undo())
+        self._clear.setEnabled(not self._canvas.is_empty())
+
+    def _undo_if_drawing(self) -> None:
+        # Metin sekmesinde Ctrl+Z metin kutusunun kendi geri almasıdır.
+        if self.is_drawing() and not self._content.hasFocus():
+            self._canvas.undo()
+
+    def _load_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Görsel seç", "", "Görseller (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not path:
+            return
+        image = QImage(path)
+        if image.isNull():
+            QMessageBox.warning(self, APP_NAME, "Bu dosya görsel olarak açılamadı.")
+            return
+        self._canvas.set_base(image)
+
     def _save(self) -> None:
+        image = None
+        if self.is_drawing():
+            drawn = self._canvas.image()
+            if drawn.isNull():
+                QMessageBox.warning(self, APP_NAME, "Çizim alanı boş. Önce bir şey çizin.")
+                return
+            image = to_png(drawn)
         args = (
             self._name.text(),
-            self._content.toPlainText(),
+            "" if image is not None else self._content.toPlainText(),
             self._shortcode.text(),
             self._tag.text(),
+            image,
         )
         try:
             if self._snippet:
@@ -140,7 +254,10 @@ class SnippetManagerDialog(QDialog):
                 parts.append(f"# {s.tag}")
             item = QListWidgetItem("    ".join(parts))
             item.setData(Qt.ItemDataRole.UserRole, s.id)
-            item.setToolTip(s.content[:500])
+            if s.is_image:
+                item.setText(item.text() + "    [görsel]")
+            else:
+                item.setToolTip(s.content[:500])
             self._list.addItem(item)
             if s.id == select_id:
                 self._list.setCurrentItem(item)

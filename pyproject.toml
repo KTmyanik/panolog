@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "panolog"
+version = "0.1.0"
+description = "Windows 11 için kategorili clipboard geçmiş yöneticisi"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6-Essentials>=6.7",
+    # OCR (Windows.Media.Ocr). Eksik olurlarsa uygulama çalışır, yalnızca OCR devre dışı kalır.
+    "winrt-runtime>=4; sys_platform == 'win32'",
+    "winrt-Windows.Media.Ocr; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.Imaging; sys_platform == 'win32'",
+    "winrt-Windows.Globalization; sys_platform == 'win32'",
+    "winrt-Windows.Storage.Streams; sys_platform == 'win32'",
+    "winrt-Windows.Foundation; sys_platform == 'win32'",
+    "winrt-Windows.Foundation.Collections; sys_platform == 'win32'",
+    # Yerel OCR modeli (kod ve numaralar için). Eksikse yalnızca Windows OCR kullanılır.
+    "onnxruntime>=1.20",
+    "numpy>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+build = ["pyinstaller>=6.10"]
+
+[project.gui-scripts]
+panolog = "panolog.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"panolog.ocr" = ["models/*.onnx", "models/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -27,6 +27,24 @@ def files_hash(paths: Iterable[str]) -> str:
     return text_hash("\n".join(sorted(os.path.normcase(os.path.normpath(p)) for p in paths)))
 
 
+def split_tag_query(query: str) -> tuple[str | None, str]:
+    """Aramayı (etiket süzgeci, kalan metin) olarak ayırır.
+
+    "#uat sorgu" -> ("uat", "sorgu"); "#" -> ("", ""); etiket yoksa (None, arama).
+    """
+    stripped = query.strip()
+    if not stripped.startswith("#"):
+        return None, query
+    head, _, rest = stripped[1:].partition(" ")
+    return head.lower(), rest
+
+
+def clean_tag(tag: str | None) -> str | None:
+    """Etiketi kaydetmeden önce sadeleştirir: baştaki '#', boşluklar atılır; boşsa None."""
+    value = " ".join((tag or "").replace("#", " ").split())
+    return value[:40] or None
+
+
 def _like_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -61,6 +79,7 @@ class Repository:
         sensitive: bool = False,
         masked_text: str | None = None,
         limit: int | None = None,
+        kind: str | None = None,
     ) -> tuple[Item, bool]:
         """Öğeyi ekler; aynı içerik varsa yeni kayıt açmadan en üste taşır.
 
@@ -93,8 +112,8 @@ class Repository:
         cur = self._conn.execute(
             """INSERT INTO items (category, content_hash, text, html, search_text, image_path,
                                   thumb_path, width, height, source_app, created_at, copied_at,
-                                  expires_at, files, sensitive, masked_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  expires_at, files, sensitive, masked_text, kind)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 category.value,
                 content_hash,
@@ -112,6 +131,7 @@ class Repository:
                 files_to_json(files) if files else None,
                 int(sensitive),
                 masked_text,
+                kind,
             ),
         )
         self._conn.commit()
@@ -128,6 +148,11 @@ class Repository:
         """Sabitlenenler üstte, sonra en yeni kopyalanan."""
         sql = "SELECT * FROM items WHERE category = ?"
         params: list[object] = [category.value]
+        tag, query = split_tag_query(query)
+        if tag is not None:
+            # "#uat" yalnızca o etiketle başlayanları, tek başına "#" etiketli her şeyi getirir.
+            sql += " AND tag IS NOT NULL AND lower(tag) LIKE ? ESCAPE '\\'"
+            params.append(f"{_like_escape(tag)}%")
         q = normalize_search(query.strip())
         if q:
             sql += " AND search_text LIKE ? ESCAPE '\\'"
@@ -164,6 +189,137 @@ class Repository:
             (1 if pinned else 0, 1 if pinned else 0, item_id),
         )
         self._conn.commit()
+
+    # ---- etiketler ----------------------------------------------------------
+    def set_tag(self, item_ids: Iterable[int], tag: str | None) -> int:
+        """Öğeleri etiketler; etiketlenen öğe sabitlenir (otomatik temizlikte silinmesin).
+        `tag` boşsa etiket kalkar, sabitleme olduğu gibi kalır. Etkilenen öğe sayısı döner."""
+        tag = clean_tag(tag)
+        changed = 0
+        for item_id in item_ids:
+            if tag is None:
+                cur = self._conn.execute("UPDATE items SET tag = NULL WHERE id = ?", (item_id,))
+            else:
+                cur = self._conn.execute(
+                    "UPDATE items SET tag = ?, pinned = 1, expires_at = NULL WHERE id = ?",
+                    (tag, item_id),
+                )
+            changed += cur.rowcount
+        self._conn.commit()
+        return changed
+
+    def set_expiry(self, item_id: int, expires_at: float) -> None:
+        """Öğeye silinme zamanı verir; sabitlenmiş öğelere dokunmaz."""
+        self._conn.execute(
+            "UPDATE items SET expires_at = ? WHERE id = ? AND pinned = 0", (expires_at, item_id)
+        )
+        self._conn.commit()
+
+    def restore_meta(
+        self,
+        item_id: int,
+        *,
+        created_at: float | None,
+        copied_at: float | None,
+        pinned: bool,
+        tag: str | None,
+    ) -> None:
+        """Yedekten gelen öğenin tarihlerini, sabitlemesini ve etiketini geri yükler."""
+        if isinstance(created_at, (int, float)) and isinstance(copied_at, (int, float)):
+            self._conn.execute(
+                "UPDATE items SET created_at = ?, copied_at = ? WHERE id = ?",
+                (float(created_at), float(copied_at), item_id),
+            )
+        self._conn.execute(
+            "UPDATE items SET pinned = ?, tag = ? WHERE id = ?",
+            (1 if pinned else 0, clean_tag(tag if isinstance(tag, str) else None), item_id),
+        )
+        self._conn.commit()
+
+    def tags(self, category: Category | None = None) -> list[tuple[str, int]]:
+        """Kullanılan etiketler ve öğe sayıları, ada göre sıralı."""
+        sql = "SELECT tag, COUNT(*) FROM items WHERE tag IS NOT NULL"
+        params: list[object] = []
+        if category is not None:
+            sql += " AND category = ?"
+            params.append(category.value)
+        rows = self._conn.execute(sql + " GROUP BY tag", params).fetchall()
+        return sorted(((r[0], r[1]) for r in rows), key=lambda r: normalize_search(r[0]))
+
+    # ---- kod kategorisi ve linkler --------------------------------------------
+    def reclassify(self, item_id: int, category: Category, kind: str | None) -> bool:
+        """Öğenin kategorisini değiştirir. Hedefte aynı içerik varsa dokunmaz, False döner."""
+        try:
+            self._conn.execute(
+                "UPDATE items SET category = ?, kind = ? WHERE id = ?",
+                (category.value, kind, item_id),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        self._conn.commit()
+        return True
+
+    def set_link_meta(self, item_id: int, title: str | None, icon: bytes | None) -> None:
+        self._conn.execute(
+            "UPDATE items SET link_title = ?, link_icon = ? WHERE id = ? AND category = ?",
+            (title, icon, item_id, Category.LINK.value),
+        )
+        if title:  # başlıkla da aranabilsin
+            row = self._conn.execute("SELECT text FROM items WHERE id = ?", (item_id,)).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    "UPDATE items SET search_text = ? WHERE id = ? AND category = ?",
+                    (normalize_search(f"{row[0] or ''}\n{title}"), item_id, Category.LINK.value),
+                )
+        self._conn.commit()
+
+    def all_items(self) -> list[Item]:
+        """Tüm geçmiş: kategoriye, sonra kopyalanma zamanına göre (dışa aktarma için)."""
+        rows = self._conn.execute("SELECT * FROM items ORDER BY category, copied_at DESC, id DESC")
+        return [Item.from_row(r) for r in rows]
+
+    # ---- kullanım sayaçları -----------------------------------------------------
+    def bump_stat(self, category: Category, app: str | None, day: str | None = None) -> None:
+        """Bugünün sayacını bir artırır. Yalnızca sayı tutulur; içerik kaydedilmez."""
+        day = day or time.strftime("%Y-%m-%d", time.localtime(self._clock()))
+        self._conn.execute(
+            "INSERT INTO stats (day, category, app, count) VALUES (?, ?, ?, 1)"
+            " ON CONFLICT (day, category, app) DO UPDATE SET count = count + 1",
+            (day, category.value, (app or "").lower()),
+        )
+        self._conn.commit()
+
+    def stats_by_day(self, since_day: str) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT day, SUM(count) FROM stats WHERE day >= ? GROUP BY day", (since_day,)
+        )
+        return {r[0]: r[1] for r in rows}
+
+    def stats_by_app(self, since_day: str, limit: int = 8) -> list[tuple[str, int]]:
+        rows = self._conn.execute(
+            "SELECT app, SUM(count) AS n FROM stats WHERE day >= ? GROUP BY app"
+            " ORDER BY n DESC, app LIMIT ?",
+            (since_day, limit),
+        )
+        return [(r[0], r[1]) for r in rows]
+
+    def stats_by_category(self, since_day: str) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT category, SUM(count) FROM stats WHERE day >= ? GROUP BY category", (since_day,)
+        )
+        return {r[0]: r[1] for r in rows}
+
+    def clear_stats(self) -> None:
+        self._conn.execute("DELETE FROM stats")
+        self._conn.commit()
+
+    def known_apps(self) -> list[str]:
+        """Geçmişte ya da sayaçlarda görülen uygulama adları (kural eklerken önermek için)."""
+        apps = {r[0].lower() for r in self._conn.execute(
+            "SELECT DISTINCT source_app FROM items WHERE source_app IS NOT NULL AND source_app != ''"
+        )}
+        apps |= {r[0] for r in self._conn.execute("SELECT DISTINCT app FROM stats WHERE app != ''")}
+        return sorted(apps)
 
     # ---- OCR ----------------------------------------------------------------
     def set_ocr(self, item_id: int, text: str | None) -> None:

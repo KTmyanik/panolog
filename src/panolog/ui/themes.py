@@ -37,6 +37,7 @@ class Theme:
     rows: str = "list"  # "list" (düz satır), "cards" (çerçeveli kart), "notes" (iki sütun not)
     animated: bool = False  # arka plan hareketli mi
     glass: bool = False  # Windows izin verirse arkadaki masaüstü bulanık görünsün
+    dark: bool = True  # zemin koyu mu (kod renklendirme paleti buna göre seçilir)
     brand: bool = False  # üstte uygulama adı gösterilsin mi
     row_margins: tuple[int, int, int, int] = (8, 6, 8, 6)
     row_qss: str = ""  # "notes" görünümünde satırın kendi stil sayfası
@@ -174,6 +175,7 @@ THEMES: dict[str, Theme] = {
             _PAPER_PREVIEW,
             backdrop="cork",
             rows="notes",
+            dark=False,
             row_margins=(4, 2, 4, 2),
             row_qss=_PAPER_ROW_QSS,
             text_lines=4,
@@ -185,6 +187,7 @@ THEMES: dict[str, Theme] = {
             _BRUTAL_PREVIEW,
             backdrop="brutal",
             rows="cards",
+            dark=False,
             brand=True,
             row_margins=(14, 10, 20, 17),
             spacing=10,

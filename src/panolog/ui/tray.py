@@ -19,6 +19,10 @@ class Tray(QSystemTrayIcon):
     clearRequested = Signal()
     settingsRequested = Signal()
     snippetsRequested = Signal()
+    statsRequested = Signal()
+    exportRequested = Signal()
+    importRequested = Signal()
+    queueCancelRequested = Signal()
     quitRequested = Signal()
 
     def __init__(self) -> None:
@@ -38,8 +42,16 @@ class Tray(QSystemTrayIcon):
         self._skip_action.setCheckable(True)
         self._skip_action.triggered.connect(self.skipNextToggled)
         menu.addAction("Geçmişi temizle…").triggered.connect(self.clearRequested)
+        # Sıralı yapıştırma kuyruğu doluyken görünür.
+        self._queue_action = menu.addAction("")
+        self._queue_action.triggered.connect(self.queueCancelRequested)
+        self._queue_action.setVisible(False)
         menu.addSeparator()
         menu.addAction("Şablonlar…").triggered.connect(self.snippetsRequested)
+        menu.addAction("İstatistikler…").triggered.connect(self.statsRequested)
+        backup = menu.addMenu("Yedek")
+        backup.addAction("Geçmişi dışa aktar…").triggered.connect(self.exportRequested)
+        backup.addAction("Yedekten içe aktar…").triggered.connect(self.importRequested)
         menu.addAction("Ayarlar…").triggered.connect(self.settingsRequested)
         menu.addSeparator()
         menu.addAction("Çıkış").triggered.connect(self.quitRequested)
@@ -52,6 +64,13 @@ class Tray(QSystemTrayIcon):
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.openRequested.emit()
+
+    def set_queue(self, remaining: int, hotkey: str = "") -> None:
+        """Sıralı yapıştırma kuyruğunda kalan öğe sayısını menüde gösterir."""
+        self._queue_action.setVisible(remaining > 0)
+        self._queue_action.setText(
+            f"Sıralı yapıştırma: {remaining} öğe kaldı ({hotkey}) · iptal et"
+        )
 
     def set_status(self, status: PauseStatus) -> None:
         self._status = status

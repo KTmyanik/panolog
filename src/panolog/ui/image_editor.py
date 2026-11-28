@@ -43,7 +43,10 @@ TOOLS: list[tuple[str, str, str, Tool]] = [
         imaging.blur,
     ),
     ("Kırp", "C", "Yalnızca seçtiğiniz alan kalır.", imaging.crop),
+    ("Kutu", "U", "Alanın çevresine kırmızı çerçeve çizer.", imaging.box),
+    ("Ok", "O", "Sürüklediğiniz yönde kırmızı ok çizer; ok başı bıraktığınız uçtadır.", imaging.arrow),
 ]
+LINE_TOOLS = {"Ok"}  # dikdörtgen yerine başlangıç ve bitiş noktasıyla çalışan araçlar
 
 
 def fit_scale(image: QSize, available: QSize) -> float:
@@ -68,10 +71,20 @@ class EditSession:
         """İşlemi uygular. Alan görselin dışındaysa hiçbir şey değişmez, False döner."""
         if imaging.clamp(self.image, rect).isEmpty():
             return False
+        self._push(tool(self.image, rect))
+        return True
+
+    def apply_line(self, tool, start: QPoint, end: QPoint) -> bool:
+        """İki noktayla çalışan aracı (ok) uygular; noktalar aynıysa False döner."""
+        if (start - end).manhattanLength() < _MIN_DRAG:
+            return False
+        self._push(tool(self.image, start, end))
+        return True
+
+    def _push(self, image: QImage) -> None:
         self._undo.append(self.image)
         del self._undo[:-_MAX_UNDO]
-        self.image = tool(self.image, rect)
-        return True
+        self.image = image
 
     def undo(self) -> bool:
         if not self._undo:
@@ -84,6 +97,7 @@ class _Canvas(QWidget):
     """Görseli (gerekirse küçülterek) gösterir; sürüklenen alanı görsel pikseline çevirir."""
 
     selected = Signal(QRect)  # görsel koordinatlarında
+    lined = Signal(QPoint, QPoint)  # çizgi araçları için: başlangıç ve bitiş (görsel)
 
     def __init__(self, image: QImage, available: QSize) -> None:
         super().__init__()
@@ -92,6 +106,8 @@ class _Canvas(QWidget):
         self._scale = 1.0
         self._origin: QPoint | None = None
         self._drag: QRect | None = None
+        self._end: QPoint | None = None
+        self.line_mode = False  # açıkken sürükleme dikdörtgen değil çizgi olarak gösterilir
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.set_image(image)
 
@@ -119,7 +135,11 @@ class _Canvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawImage(self.rect(), self._image)
-        if self._drag is not None:
+        if self.line_mode and self._origin is not None and self._end is not None:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(imaging.MARK_COLOR, 2))
+            painter.drawLine(self._origin, self._end)
+        elif self._drag is not None:
             painter.fillRect(self._drag, QColor(47, 125, 225, 60))
             painter.setPen(QPen(QColor(255, 255, 255), 1, Qt.PenStyle.DashLine))
             painter.drawRect(self._drag.adjusted(0, 0, -1, -1))
@@ -131,17 +151,32 @@ class _Canvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._origin is not None:
-            self._drag = QRect(self._origin, event.position().toPoint()).normalized()
+            pos = event.position().toPoint()
+            self._end = QPoint(
+                min(max(pos.x(), 0), self.width() - 1), min(max(pos.y(), 0), self.height() - 1)
+            )
+            self._drag = QRect(self._origin, pos).normalized()
             self._drag = self._drag.intersected(self.rect())
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton or self._origin is None:
             return
-        drag, self._origin, self._drag = self._drag, None, None
+        drag, origin, end = self._drag, self._origin, self._end
+        self._origin = self._drag = self._end = None
         self.update()
-        if drag is not None and drag.width() >= _MIN_DRAG and drag.height() >= _MIN_DRAG:
+        if self.line_mode:
+            if end is not None:
+                self.lined.emit(self.point_to_image(origin), self.point_to_image(end))
+        elif drag is not None and drag.width() >= _MIN_DRAG and drag.height() >= _MIN_DRAG:
             self.selected.emit(self.to_image(drag))
+
+    def point_to_image(self, point: QPoint) -> QPoint:
+        s = self._scale
+        return QPoint(
+            min(self._image.width() - 1, int(point.x() / s)),
+            min(self._image.height() - 1, int(point.y() / s)),
+        )
 
 
 class ImageEditorDialog(QDialog):
@@ -159,6 +194,7 @@ class ImageEditorDialog(QDialog):
         available = QSize(int(area.width() * 0.85), int(area.height() * 0.85) - 150)
         self._canvas = _Canvas(image, available)
         self._canvas.selected.connect(self._apply)
+        self._canvas.lined.connect(self._apply_line)
 
         lay = QVBoxLayout(self)
         bar = QHBoxLayout()
@@ -215,6 +251,12 @@ class ImageEditorDialog(QDialog):
     def select_tool(self, index: int) -> None:
         self._group.button(index).setChecked(True)
 
+    def _apply_line(self, start: QPoint, end: QPoint) -> None:
+        tool = TOOLS[self._group.checkedId()][3]
+        if self._session.apply_line(tool, start, end):
+            self._canvas.set_image(self._session.image)
+            self._update_state()
+
     def _apply(self, rect: QRect) -> None:
         tool = TOOLS[self._group.checkedId()][3]
         if self._session.apply(tool, rect):
@@ -230,6 +272,7 @@ class ImageEditorDialog(QDialog):
 
     def _update_state(self) -> None:
         image = self._session.image
+        self._canvas.line_mode = TOOLS[self._group.checkedId()][0] in LINE_TOOLS
         self._tip.setText(
             f"Fareyle bir alan seçin. {TOOLS[self._group.checkedId()][2]}"
         )

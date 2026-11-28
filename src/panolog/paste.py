@@ -45,6 +45,18 @@ def write_to_clipboard(item: Item, plain: bool = False) -> bool:
     return True
 
 
+def write_files_to_clipboard(paths: list[str]) -> bool:
+    """Birden çok dosyayı tek seferde (CF_HDROP) yazar; var olmayan yollar atlanır."""
+    existing = [p for p in dict.fromkeys(paths) if os.path.exists(p)]
+    if not existing:
+        return False
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(p) for p in existing])
+    mime.setData(INTERNAL_MIME, b"1")
+    QGuiApplication.clipboard().setMimeData(mime)
+    return True
+
+
 def write_image_to_clipboard(image: QImage) -> None:
     """Görseli (ör. düzenlenmiş bir kopyayı) clipboard'a yazar; izleyici yeniden kaydetmez."""
     mime = QMimeData()

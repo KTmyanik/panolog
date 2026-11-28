@@ -4,10 +4,13 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from . import codekind
+
 
 class Category(str, Enum):
     IMAGE = "image"
     TEXT = "text"
+    CODE = "code"  # SQL, JSON, XML ve diğer kod parçaları
     LINK = "link"
     FILE = "file"
 
@@ -42,7 +45,9 @@ def is_url(text: str) -> bool:
 
 
 def classify_text(text: str) -> Category:
-    return Category.LINK if is_url(text) else Category.TEXT
+    if is_url(text):
+        return Category.LINK
+    return Category.CODE if codekind.detect(text) else Category.TEXT
 
 
 def classify(*, has_files: bool, has_image: bool, text: str | None) -> Category | None:

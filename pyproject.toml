@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "panolog"
-version = "0.3.0"
+version = "0.4.0"
 description = "Windows 11 için kategorili clipboard geçmiş yöneticisi"
 requires-python = ">=3.11"
 dependencies = [

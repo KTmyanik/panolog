@@ -90,6 +90,44 @@ def _check_ui() -> str:
     )
 
 
+def _check_features() -> str:
+    """Kod algılama, dönüştürme, yedek ve istatistik; ağ modülleri yüklenir ama istek atılmaz."""
+    import ssl
+
+    from . import backup, codekind, linkmeta, transforms
+    from .classifier import Category, classify_text
+    from .storage import Repository, connect
+    from .storage.images import ImageStore
+    from .storage.repository import text_hash
+    from .ui.stats_dialog import StatsDialog
+
+    if classify_text("SELECT a FROM t WHERE b = 1;") is not Category.CODE:
+        raise RuntimeError("SQL kod olarak sınıflanmadı")
+    if "<span" not in codekind.highlight_html('{"a": 1}', "json", codekind.PALETTE_DARK):
+        raise RuntimeError("kod renklendirilmedi")
+    if transforms.upper_tr("iğne") != "İĞNE":
+        raise RuntimeError("Türkçe büyük harf dönüşümü yanlış")
+    ssl.create_default_context()  # link başlığı için gereken TLS pakette mi?
+    if linkmeta.parse_title("<html><title>Başlık</title></html>") != "Başlık":
+        raise RuntimeError("sayfa başlığı ayrıştırılamadı")
+    if linkmeta.is_fetchable("http://localhost/x"):
+        raise RuntimeError("yerel adres istek atılabilir sayıldı")
+
+    repo = Repository(connect(":memory:"))
+    item, _new = repo.add_item(Category.TEXT, text_hash("yedek"), text="yedek")
+    repo.set_tag([item.id], "uat")
+    repo.bump_stat(Category.TEXT, "notepad.exe")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "yedek.json"
+        backup.export_json(repo.all_items(), path)
+        other = Repository(connect(":memory:"))
+        added, _skipped = backup.import_json(path, other, ImageStore(Path(tmp) / "img"))
+    if added != 1 or [t for t, _n in other.tags()] != ["uat"]:
+        raise RuntimeError("yedek geri yüklenemedi")
+    StatsDialog(repo)
+    return "kod algılama, dönüştürme, yedek, istatistik ve TLS çalışıyor"
+
+
 def _check_ocr() -> str:
     from PySide6.QtGui import QColor, QImage
 
@@ -131,6 +169,7 @@ def run(report_path: str | None) -> int:
         ("depolama", _check_storage),
         ("görsel", _check_png),
         ("arayüz", _check_ui),
+        ("özellikler", _check_features),
         ("ocr", _check_ocr),
     ):
         try:

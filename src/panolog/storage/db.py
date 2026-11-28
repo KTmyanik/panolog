@@ -66,6 +66,22 @@ _MIGRATIONS: list[str] = [
     # v8: görsel şablonlar (ör. elle çizilmiş imza). PNG verisi doğrudan veritabanında durur:
     # küçüktür, kalıcıdır ve geçmişin görsel klasöründeki temizlikten etkilenmemelidir.
     "ALTER TABLE snippets ADD COLUMN image BLOB;",
+    # v9: etiketler, kod türü (sql/json/xml/code), link başlığı/simgesi ve kullanım sayaçları.
+    # stats yalnızca sayı tutar (gün, kategori, uygulama); kopyalanan içerik buraya yazılmaz.
+    """
+    ALTER TABLE items ADD COLUMN tag TEXT;
+    ALTER TABLE items ADD COLUMN kind TEXT;
+    ALTER TABLE items ADD COLUMN link_title TEXT;
+    ALTER TABLE items ADD COLUMN link_icon BLOB;
+    CREATE INDEX idx_items_tag ON items (tag);
+    CREATE TABLE stats (
+        day      TEXT NOT NULL,
+        category TEXT NOT NULL,
+        app      TEXT NOT NULL DEFAULT '',
+        count    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, category, app)
+    );
+    """,
 ]
 
 

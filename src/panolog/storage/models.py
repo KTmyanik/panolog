@@ -69,6 +69,10 @@ class Item:
     masked_text: str | None = None  # doluysa listede asıl metin yerine bu gösterilir
     ocr_text: str | None = None  # görselden okunan metin
     ocr_done: bool = False  # OCR çalıştı (metin boş çıkmış olabilir)
+    tag: str | None = None  # kullanıcının verdiği etiket (klasör)
+    kind: str | None = None  # kod türü: sql, json, xml, code
+    link_title: str | None = None  # linkin sayfa başlığı (isteğe bağlı özellik)
+    link_icon: bytes | None = None  # linkin site simgesi (PNG)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Item":
@@ -92,4 +96,8 @@ class Item:
             masked_text=row["masked_text"],
             ocr_text=row["ocr_text"],
             ocr_done=row["ocr_status"] == 1,
+            tag=row["tag"],
+            kind=row["kind"],
+            link_title=row["link_title"],
+            link_icon=bytes(row["link_icon"]) if row["link_icon"] is not None else None,
         )

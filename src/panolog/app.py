@@ -6,17 +6,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QStandardPaths, QTimer
+from PySide6.QtCore import QObject, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QSystemTrayIcon
 
-from . import APP_NAME, paths, winapi
+from . import APP_NAME, backup, codekind, paths, winapi
 from .classifier import Category, classify
 from .hotkey import GlobalHotkey, HotkeyError
+from .linkmeta import LinkMetaService
 from .monitor import ClipboardListener, PauseState, read_clipboard
 from .ocr import OcrResult, OcrService, OcrUnavailable, pipeline
 from .paste import (
     return_focus,
+    write_files_to_clipboard,
     write_image_to_clipboard,
     write_text_to_clipboard,
     write_to_clipboard,
@@ -30,7 +32,9 @@ from .storage.repository import files_hash, text_hash
 from .ui.image_editor import ImageEditorDialog
 from .ui.popup import Popup
 from .ui.settings_dialog import SettingsDialog
+from .ui.draw_canvas import to_png
 from .ui.snippet_dialogs import SnippetEditDialog, SnippetManagerDialog
+from .ui.stats_dialog import StatsDialog
 from .ui.tray import Tray
 
 _MAINTENANCE_MS = 30_000
@@ -72,6 +76,11 @@ class Controller(QObject):
         self._popup.ocrRequested.connect(self._ocr_requested)
         self._popup.editImageRequested.connect(self._edit_image)
         self._popup.saveImageRequested.connect(self._save_image)
+        self._popup.pasteTextRequested.connect(self._paste_text)
+        self._popup.pasteManyRequested.connect(self._paste_many)
+        self._popup.queueRequested.connect(self._start_queue)
+        self._popup.exportRequested.connect(self._export)
+        self._popup.ruleRequested.connect(lambda app: self._open_settings(rule_app=app))
 
         self._ocr = OcrService()
         self._ocr.finished.connect(self._ocr_finished)
@@ -97,6 +106,10 @@ class Controller(QObject):
         self._tray.clearRequested.connect(self._clear_history)
         self._tray.settingsRequested.connect(self._open_settings)
         self._tray.snippetsRequested.connect(self._open_snippet_manager)
+        self._tray.statsRequested.connect(self._open_stats)
+        self._tray.exportRequested.connect(lambda: self._export(None))
+        self._tray.importRequested.connect(self._import)
+        self._tray.queueCancelRequested.connect(self._cancel_queue)
         self._tray.quitRequested.connect(self.quit)
         self._tray.show()
 
@@ -106,6 +119,16 @@ class Controller(QObject):
         self._hotkey = GlobalHotkey()
         self._hotkey.activated.connect(self.toggle_popup)
         self._register_hotkey()
+        # Sıralı yapıştırma: kuyruktaki öğeleri ikinci bir global kısayol birer birer yapıştırır.
+        # Klavye kancası kurulmadığı için Ctrl+V'nin kendisi izlenemez; ayrı kısayol bu yüzden.
+        self._queue: list[int] = []
+        self._seq_hotkey = GlobalHotkey()
+        self._seq_hotkey.activated.connect(self._paste_next)
+        self._register_seq_hotkey(notify=False)
+
+        self._links = LinkMetaService()
+        self._links.finished.connect(self._link_meta_ready)
+        self._scan_existing_code()
 
         self._timer = QTimer(self)
         self._timer.setInterval(_MAINTENANCE_MS)
@@ -125,13 +148,16 @@ class Controller(QObject):
         )
         if category is None:
             return
+        rule = self._settings.rule_for(source_app)
+        if rule is not None and rule["action"] == "skip":
+            return  # kullanıcı bu uygulamadan gelenlerin kaydedilmemesini istedi
         # Buraya gelen kopya normalde kaydedilirdi; "sonraki kopyayı kaydetme" onu tüketir.
         if not self._pause.allow():
             self._sync_pause()
             return
         limit = self._settings.limit_for(category)
         if category is Category.FILE:
-            self._repo.add_item(
+            item, _created = self._repo.add_item(
                 category,
                 files_hash(payload.files),
                 files=[FileRef.from_path(p) for p in payload.files],
@@ -139,13 +165,53 @@ class Controller(QObject):
                 limit=limit,
             )
         elif category is Category.IMAGE:
-            self._record_image(payload.image, source_app)
+            item = self._record_image(payload.image, source_app)
         else:
             html = payload.html if category is Category.TEXT else None
-            if not self._record_text(category, payload.text or "", html, source_app):
+            item = self._record_text(category, payload.text or "", html, source_app)
+            if item is None:
                 return
+        self._repo.bump_stat(category, source_app)  # yalnızca sayaç; içerik yazılmaz
+        self._apply_rule(rule, item.id)
+        if category is Category.LINK and self._settings.link_fetch and not item.link_title:
+            self._links.request(item.id, item.text or "")
         if self._popup.isVisible():
             self._popup.refresh()
+
+    def _apply_rule(self, rule: dict | None, item_id: int) -> None:
+        """Uygulama kuralının kayıttan sonraki etkisi: etiketleme ya da süreli silme."""
+        if rule is None:
+            return
+        if rule["action"] == "tag":
+            self._repo.set_tag([item_id], rule["value"])
+        elif rule["action"] == "expire":
+            seconds = int(rule["value"]) * 60
+            self._repo.set_expiry(item_id, time.time() + seconds)
+            if seconds <= 3600:  # kısa süreler periyodik bakımı beklemeden silinsin
+                QTimer.singleShot(seconds * 1000 + 250, self._maintain)
+
+    def _scan_existing_code(self) -> None:
+        """Bir kereliğine: Kod sekmesi eklenmeden önce kaydedilmiş metinleri oraya taşır."""
+        if self._repo.get_setting("code_scan") == "1":
+            return
+        for item in self._repo.list_items(Category.TEXT):
+            kind = codekind.detect(item.text or "")
+            if kind:
+                self._repo.reclassify(item.id, Category.CODE, kind)
+        self._repo.set_setting("code_scan", "1")
+
+    def _link_meta_ready(self, item_id: int, title, icon) -> None:
+        """Arka planda alınan sayfa başlığı ve simgeyi kaydeder (simge küçük PNG'ye çevrilir)."""
+        png = None
+        if icon:
+            image = QImage.fromData(icon)
+            if not image.isNull():
+                png = to_png(image.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation))
+        if title or png:
+            self._repo.set_link_meta(item_id, title, png)
+            if self._popup.isVisible():
+                self._popup.refresh()
 
     def _record_image(self, image: QImage, source_app: str | None):
         """Görseli diske ve geçmişe ekler; otomatik OCR açıksa okumayı başlatır."""
@@ -168,8 +234,9 @@ class Controller(QObject):
 
     def _record_text(
         self, category: Category, text: str, html: str | None, source_app: str | None
-    ) -> bool:
-        """Metni/linki hassas veri ayarına göre geçmişe ekler. Kaydedildiyse True."""
+    ):
+        """Metni/linki/kodu hassas veri ayarına göre geçmişe ekler. Kaydedilen öğeyi, hassas
+        veri ayarı nedeniyle kaydedilmediyse None döndürür."""
         if category is Category.LINK:
             text = text.strip()
         if html and len(html) > _MAX_HTML_CHARS:
@@ -183,13 +250,14 @@ class Controller(QObject):
             ttl_seconds=s.sensitive_ttl_seconds,
         )
         if not decision.store:
-            return False
+            return None
         ttl = decision.ttl_seconds
-        self._repo.add_item(
+        item, _created = self._repo.add_item(
             category,
             text_hash(text),
             text=text,
             html=html,
+            kind=codekind.detect(text) if category is Category.CODE else None,
             source_app=source_app,
             sensitive=decision.sensitive,
             masked_text=decision.masked_text,
@@ -198,7 +266,7 @@ class Controller(QObject):
         )
         if ttl:  # süre dolar dolmaz sil; periyodik bakımı bekleme
             QTimer.singleShot(int(ttl * 1000) + 250, self._maintain)
-        return True
+        return item
 
     # ---- popup ve yapıştırma ------------------------------------------------
     def toggle_popup(self) -> None:
@@ -220,6 +288,166 @@ class Controller(QObject):
         # Önce odağı geri ver, sonra gizle: popup hâlâ öndeyken odak değiştirmeye izin var.
         return_focus(self._prev_window, send_paste=self._settings.auto_paste)
         self._popup.hide()
+
+    def _paste_text(self, text: str) -> None:
+        """Dönüştürülmüş metni yapıştırır; asıl öğe değişmez, sonuç geçmişe eklenmez."""
+        write_text_to_clipboard(text)
+        return_focus(self._prev_window, send_paste=self._settings.auto_paste)
+        self._popup.hide()
+
+    def _paste_many(self, item_ids: list) -> None:
+        """Çoklu seçim: metinleri ayraçla birleştirir, dosyaları tek listede yapıştırır."""
+        items = [i for i in (self._repo.get(item_id) for item_id in item_ids) if i is not None]
+        if not items:
+            return
+        category = items[0].category
+        if category is Category.IMAGE:
+            self._popup.show_status("Görseller birleştirilemez; Ctrl+Enter ile sıralı yapıştırın")
+            return
+        if category is Category.FILE:
+            paths = [f.path for item in items for f in item.files]
+            if not write_files_to_clipboard(paths):
+                self._notify("Dosyalar bulunamadı (silinmiş veya taşınmış olabilir).")
+                return
+        else:
+            write_text_to_clipboard(
+                self._settings.join_separator.join(item.text or "" for item in items)
+            )
+        return_focus(self._prev_window, send_paste=self._settings.auto_paste)
+        self._popup.hide()
+
+    # ---- sıralı yapıştırma --------------------------------------------------
+    def _start_queue(self, item_ids: list) -> None:
+        self._queue = [item_id for item_id in item_ids if self._repo.get(item_id) is not None]
+        self._sync_queue()
+        return_focus(self._prev_window, send_paste=False)
+        self._popup.hide()
+        if self._queue:
+            self._tray.showMessage(
+                APP_NAME,
+                f"{len(self._queue)} öğe sıraya alındı. Her {self._settings.seq_hotkey} basışında "
+                "sıradaki öğe yapıştırılır.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+
+    def _cancel_queue(self) -> None:
+        self._queue = []
+        self._sync_queue()
+
+    def _sync_queue(self) -> None:
+        self._tray.set_queue(len(self._queue), self._settings.seq_hotkey)
+
+    def _paste_next(self) -> None:
+        """Sıralı yapıştırma kısayolu: kuyruktaki sıradaki öğeyi etkin pencereye yapıştırır."""
+        item = None
+        while self._queue and item is None:
+            item = self._repo.get(self._queue.pop(0))  # bu arada silinmiş öğeler atlanır
+        self._sync_queue()
+        if item is None:
+            self._notify(
+                "Sıralı yapıştırma kuyruğu boş. Geçmiş penceresinde öğeleri Shift+↓ ile "
+                "işaretleyip Ctrl+Enter'a basın."
+            )
+            return
+        if not write_to_clipboard(item):
+            self._notify("Öğe clipboard'a yazılamadı (dosya silinmiş veya taşınmış olabilir).")
+            return
+        # Kısayolun tuşları hâlâ basılı olabilir; clipboard yerleşsin diye kısa bir bekleme.
+        QTimer.singleShot(80, winapi.send_ctrl_v)
+        if not self._queue:
+            self._tray.showMessage(
+                APP_NAME, "Sıralı yapıştırma bitti.", QSystemTrayIcon.MessageIcon.Information, 3000
+            )
+
+    def _register_seq_hotkey(self, notify: bool = True) -> None:
+        try:
+            self._seq_hotkey.register(self._settings.seq_hotkey)
+        except HotkeyError as exc:
+            if notify:
+                self._notify(f"Sıralı yapıştırma kısayolu: {exc}")
+
+    # ---- dışa aktarma, yedek, istatistik -----------------------------------------
+    def _run_dialog(self, run):
+        """Tek seferde bir pencere: popup kapatılır, pencere bitene kadar başkası açılmaz."""
+        if self._dialog_open:
+            return None
+        self._popup.hide()
+        self._dialog_open = True
+        try:
+            return run()
+        finally:
+            self._dialog_open = False
+
+    def _export(self, item_ids: list | None) -> None:
+        """Seçili öğeleri (None ise tüm geçmişi) JSON yedek ya da Markdown olarak yazar."""
+        if item_ids is None:
+            items = self._repo.all_items()
+        else:
+            items = [i for i in (self._repo.get(x) for x in item_ids) if i is not None]
+        if not items:
+            self._notify("Dışa aktarılacak öğe yok.")
+            return
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        name = f"{APP_NAME.lower()}-{datetime.now():%Y%m%d-%H%M}"
+        chosen = self._run_dialog(
+            lambda: QFileDialog.getSaveFileName(
+                None,
+                f"{APP_NAME} - Dışa aktar ({len(items)} öğe)",
+                str(Path(folder) / f"{name}.json"),
+                "JSON yedek (*.json);;Markdown belgesi (*.md)",
+            )
+        )
+        if not chosen or not chosen[0]:
+            return
+        self._export_to(items, chosen[0], markdown="Markdown" in chosen[1])
+
+    def _export_to(self, items, target: str, markdown: bool = False) -> int | None:
+        path = Path(target)
+        if path.suffix.lower() == ".md":
+            markdown = True
+        elif path.suffix.lower() != ".json":
+            path = path.with_name(path.name + (".md" if markdown else ".json"))
+        try:
+            self._images.wait()  # arka planda yazılan görseller bitsin
+            count = (backup.export_markdown if markdown else backup.export_json)(items, path)
+        except OSError as exc:
+            self._notify(f"Dışa aktarılamadı: {exc}")
+            return None
+        self._tray.showMessage(
+            APP_NAME, f"{count} öğe dışa aktarıldı: {path}",
+            QSystemTrayIcon.MessageIcon.Information, 5000,
+        )  # fmt: skip
+        return count
+
+    def _import(self) -> None:
+        chosen = self._run_dialog(
+            lambda: QFileDialog.getOpenFileName(
+                None, f"{APP_NAME} - Yedekten içe aktar", "", "JSON yedek (*.json)"
+            )
+        )
+        if chosen and chosen[0]:
+            self._import_from(chosen[0])
+
+    def _import_from(self, source: str) -> tuple[int, int] | None:
+        try:
+            added, skipped = backup.import_json(Path(source), self._repo, self._images)
+        except (backup.BackupError, OSError) as exc:
+            self._notify(f"İçe aktarılamadı: {exc}")
+            return None
+        self._scan_code_after_import()
+        self._tray.showMessage(
+            APP_NAME, f"{added} öğe eklendi, {skipped} öğe zaten vardı.",
+            QSystemTrayIcon.MessageIcon.Information, 5000,
+        )  # fmt: skip
+        return added, skipped
+
+    def _scan_code_after_import(self) -> None:
+        if self._popup.isVisible():
+            self._popup.refresh()
+
+    def _open_stats(self) -> None:
+        self._run_dialog(lambda: StatsDialog(self._repo).exec())
 
     # ---- görsel düzenleme ---------------------------------------------------
     def _edit_image(self, item_id: int) -> None:
@@ -339,7 +567,7 @@ class Controller(QObject):
             self._popup.show_status("Bu görselde okunabilir metin bulunamadı")
             return
         category = classify(has_files=False, has_image=False, text=text) or Category.TEXT
-        stored = self._record_text(category, text, None, "OCR")
+        stored = self._record_text(category, text, None, "OCR") is not None
         write_text_to_clipboard(text)
         if not self._popup.isVisible():
             self._notify("Görseldeki metin clipboard'a kopyalandı.")
@@ -485,12 +713,18 @@ class Controller(QObject):
         if answer == QMessageBox.StandardButton.Yes:
             self._repo.clear(include_pinned=False)
 
-    def _open_settings(self) -> None:
+    def _open_settings(self, rule_app: str | None = None) -> None:
         if self._settings_dialog is not None:
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
             return
-        dialog = SettingsDialog(self._settings, lambda: self._repo.clear(include_pinned=True))
+        self._popup.hide()
+        dialog = SettingsDialog(
+            self._settings,
+            lambda: self._repo.clear(include_pinned=True),
+            known_apps=self._repo.known_apps(),
+            rule_app=rule_app,
+        )
         self._settings_dialog = dialog
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -503,6 +737,9 @@ class Controller(QObject):
         self._store.save(new)
         if new.hotkey != old.hotkey:
             self._register_hotkey()
+        if new.seq_hotkey != old.seq_hotkey:
+            self._register_seq_hotkey()
+            self._sync_queue()
         try:
             if new.autostart != autostart.is_enabled():
                 autostart.set_enabled(new.autostart)
@@ -537,6 +774,8 @@ class Controller(QObject):
 
     def quit(self) -> None:
         self._hotkey.unregister()
+        self._seq_hotkey.unregister()
+        self._links.wait()
         self._listener.stop()
         self._tray.hide()
         self._images.wait()

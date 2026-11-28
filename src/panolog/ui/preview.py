@@ -5,6 +5,7 @@ from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from ..codekind import highlight_html
 from .themes import DEFAULT_THEME, get_theme
 
 _GAP = 8  # popup ile önizleme ve ekran kenarı arasındaki boşluk
@@ -145,7 +146,14 @@ class ImagePreview(QWidget):
         self.show()
         return True
 
-    def show_text(self, text: str, popup: QRect, screen: QRect) -> bool:
+    def show_text(
+        self,
+        text: str,
+        popup: QRect,
+        screen: QRect,
+        kind: str | None = None,
+        palette: dict[str, str] | None = None,
+    ) -> bool:
         """Metni eş aralıklı yazıyla, satırları kaydırarak gösterir. Boş metinde False döner.
 
         Ekrana sığmayan metin alttan kısaltılır ve kaç satırın gösterilmediği yazılır.
@@ -172,7 +180,12 @@ class ImagePreview(QWidget):
             body = "\n".join(lines)
             if len(lines) < total:
                 body += f"\n\n… {total - len(lines)} satır daha"
-            self._label.setText(body)
+            if kind and palette:  # kod: renklendirilmiş (içerik kaçışlanır)
+                self._label.setTextFormat(Qt.TextFormat.RichText)
+                self._label.setText(highlight_html(body, kind, palette))
+            else:
+                self._label.setTextFormat(Qt.TextFormat.PlainText)
+                self._label.setText(body)
             height = self._label.heightForWidth(width + pad)
             if height <= max_h:
                 break

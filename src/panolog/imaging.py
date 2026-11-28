@@ -1,13 +1,16 @@
-"""Görsel düzenleme işlemleri: alan kapatma, bulanıklaştırma, kırpma.
+"""Görsel düzenleme işlemleri: alan kapatma, bulanıklaştırma, kırpma, kutu ve ok çizme.
 
 İşlevler verilen görseli değiştirmez, yeni bir QImage döndürür.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+import math
+
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 
 COVER_COLOR = QColor(0, 0, 0)
+MARK_COLOR = QColor(229, 38, 43)  # kutu ve ok: kırmızı
 _FORMAT = QImage.Format.Format_ARGB32
 
 
@@ -69,3 +72,56 @@ def crop(image: QImage, rect: QRect) -> QImage:
     """Yalnızca seçilen alanı döndürür; alan görselin dışındaysa görsel aynen kalır."""
     area = clamp(image, rect)
     return image.copy() if area.isEmpty() else image.copy(area)
+
+
+def mark_width(image: QImage) -> int:
+    """Kutu ve ok çizgisinin kalınlığı: görsel büyüdükçe kalınlaşır, küçük görselde 3 piksel."""
+    return max(3, round(min(image.width(), image.height()) / 160))
+
+
+def box(image: QImage, rect: QRect, color: QColor = MARK_COLOR, width: int | None = None) -> QImage:
+    """Alanın çevresine çerçeve çizer; içi olduğu gibi kalır."""
+    out = _editable(image)
+    area = clamp(out, rect)
+    if area.isEmpty():
+        return out
+    width = width or mark_width(out)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color, width)
+    pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+    painter.setPen(pen)
+    half = width / 2
+    painter.drawRect(QRectF(area).adjusted(half, half, -half, -half))
+    painter.end()
+    return out
+
+
+def arrow(
+    image: QImage, start: QPoint, end: QPoint, color: QColor = MARK_COLOR, width: int | None = None
+) -> QImage:
+    """`start` noktasından `end` noktasına ok çizer; ok başı `end` ucundadır."""
+    out = _editable(image)
+    dx, dy = end.x() - start.x(), end.y() - start.y()
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return out
+    width = width or mark_width(out)
+    head = min(max(width * 4.5, 12.0), length * 0.6)
+    ux, uy = dx / length, dy / length
+    tip = QPointF(end)
+    base = QPointF(end.x() - ux * head, end.y() - uy * head)
+    half = head * 0.45
+    left = QPointF(base.x() - uy * half, base.y() + ux * half)
+    right = QPointF(base.x() + uy * half, base.y() - ux * half)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color, width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.drawLine(QPointF(start), base)  # gövde ok başının dibinde biter; uç sivri kalır
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(color)
+    painter.drawPolygon(QPolygonF([tip, left, right]))
+    painter.end()
+    return out

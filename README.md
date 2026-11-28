@@ -1,8 +1,8 @@
 # Panolog
 
 Windows 11 için kategorili clipboard geçmiş yöneticisi. Kopyaladığınız görselleri, metinleri,
-linkleri ve dosyaları ayrı sekmelerde saklar; global kısayolla açılan pencereden geri
-yapıştırırsınız.
+kod parçalarını, linkleri ve dosyaları ayrı sekmelerde saklar; global kısayolla açılan
+pencereden geri yapıştırırsınız.
 
 > Durum: ilk sürümün tüm aşamaları tamamlandı. Sonraki aşamalar için planlanan, henüz
 > yapılmamış işler `TODO.md` dosyasındadır.
@@ -69,14 +69,20 @@ Bilinmesi gerekenler:
 | `Tab` / `Shift+Tab`, `←` `→` | Sekme değiştir (oklar arama kutusu boşken) |
 | `↑` `↓` | Listede gezin |
 | `Enter` | Seçili öğeyi yapıştır |
-| `Shift+Enter` | Düz metin olarak yapıştır (biçimlendirme atılır; dosyalarda yollar metin olarak yapışır) |
+| `Shift+Enter` | Düz metin olarak yapıştır (biçimlendirme atılır; dosyalarda yollar metin olarak yapışır; linklerde takip parametreleri temizlenir) |
+| `Ctrl+D` | Dönüştürerek yapıştır: büyük/küçük harf, boşluk temizleme, satır birleştirme, JSON… |
+| `Shift+↓` / `Shift+↑` | Öğeyi işaretle ve ilerle (çoklu seçim) |
+| `Ctrl+Enter` | İşaretli öğeleri (yoksa seçili öğeyi) sıralı yapıştırmaya al |
+| `Ctrl+T` | Etiketle (işaretliler ya da seçili öğe) |
+| `Ctrl+Shift+E` | İşaretli öğeleri (yoksa seçili öğeyi) dışa aktar |
+| `F1` | Tüm tuşları göster |
 | `1`–`9` | İlk 9 öğeyi doğrudan yapıştır (arama doluyken `Alt+1`–`9`) |
-| yazmaya başla | Ara (büyük/küçük harf ve İ/ı duyarsız) |
+| yazmaya başla | Ara (büyük/küçük harf ve İ/ı duyarsız); `#etiket` etikete göre süzer |
 | `Ctrl+P` | Sabitle / sabitlemeyi kaldır |
 | `Ctrl+S` | Seçili öğeyi şablon olarak kaydet (görseller çizim alanına gelir) |
 | `Ctrl+O` | Seçili görseldeki metni çıkar (OCR): Metinler'e ekler ve clipboard'a kopyalar |
 | `Boşluk` | Seçili görseli, metni, linki ya da şablonu büyük önizle / önizlemeyi kapat (arama doluyken `Ctrl+Boşluk`) |
-| `Ctrl+E` | Seçili görseli düzenleyicide aç (kapat, bulanıklaştır, kırp) |
+| `Ctrl+E` | Seçili görseli düzenleyicide aç (kapat, bulanıklaştır, kırp, kutu, ok) |
 | `Ctrl+Shift+S` | Seçili görseli PNG dosyası olarak kaydet |
 | `Ctrl+N` / `Ctrl+E` | Şablonlar sekmesinde: yeni şablon / seçili şablonu düzenle |
 | `Delete` | Seçili öğeyi sil |
@@ -85,7 +91,105 @@ Bilinmesi gerekenler:
 Listede bir öğeye sağ tıklayınca aynı işlemler menü olarak da açılır.
 
 Tray menüsü: Duraklat/Devam et, 5 dakika duraklat, Sonraki kopyayı kaydetme, Geçmişi temizle
-(sabitlenenler kalır), Şablonlar, Ayarlar, Çıkış.
+(sabitlenenler kalır), Şablonlar, İstatistikler, Yedek (dışa/içe aktar), Ayarlar, Çıkış.
+
+### Kod sekmesi
+
+SQL, JSON, XML ve diğer kod parçaları Metinler yerine **Kod** sekmesine düşer; eş aralıklı
+yazıyla ve sözdizimi renklendirmesiyle gösterilir, satırda türü (SQL, JSON…) yazar.
+
+- Algılama bilerek temkinlidir: "Select the best option" gibi cümleler metin sayılır. Kod
+  olduğu hâlde Metinler'de kalan parçalar olabilir (ör. tek satırlık bir fonksiyon çağrısı).
+- Renklendirme basit bir sözcük eşleştirmesidir (anahtar sözcük, metin, sayı, yorum); tam bir
+  dil çözümleyicisi değildir. İçerik her zaman kaçışlanır, HTML olarak yorumlanmaz.
+- Bu sürüme geçince daha önce kaydedilmiş metinler bir kez taranır ve kod olanlar Kod
+  sekmesine taşınır. Kod sekmesinin kendi limiti vardır (Ayarlar > Genel).
+
+### Dönüştürerek yapıştırma (`Ctrl+D`)
+
+Seçili metni, kodu ya da linki değiştirip yapıştırır; asıl öğe değişmez ve sonuç geçmişe
+eklenmez.
+
+- **Harf:** BÜYÜK, küçük, Baş Harfler (Türkçe İ/ı kurallarıyla: `ışık` → `IŞIK`).
+- **Boşluk ve satır:** boşlukları temizle, satırları boşlukla ya da virgülle birleştir,
+  satırları SQL listesine çevir (`'a', 'b'`; `IN (...)` için).
+- **JSON:** güzelleştir, sıkıştır. Geçerli JSON değilse uyarı çıkar, hiçbir şey yapıştırılmaz.
+- **Türkçe karakter:** bozuk karakterleri onar (`Ã§` → `ç`), sadeleştir (`ç` → `c`).
+- **Link:** takip parametrelerini (`utm_*`, `fbclid`, `gclid`…) temizle. Linklerde
+  `Shift+Enter` bunu doğrudan yapar.
+
+### Çoklu seçim ve sıralı yapıştırma
+
+`Shift+↓` / `Shift+↑` öğeleri işaretler (yeşil onay). İşaretliyken:
+
+- `Enter` hepsini **işaretleme sırasıyla** birleştirip tek seferde yapıştırır. Ayraç
+  Ayarlar > Genel'den seçilir (yeni satır, boşluk, virgül, noktalı virgül, sekme). Dosyalar
+  tek bir dosya listesi olarak yapışır; görseller birleştirilemez.
+- `Ctrl+Enter` öğeleri **sıraya alır**. Bundan sonra her `Ctrl+Alt+N` basışı sıradaki öğeyi
+  etkin pencereye yapıştırır; tray menüsü kaç öğe kaldığını gösterir ve sırayı iptal eder.
+  Kısayol Ayarlar > Genel'den değiştirilir.
+- `Delete` hepsini siler, `Ctrl+T` hepsini etiketler, `Ctrl+Shift+E` hepsini dışa aktarır.
+
+Sıralı yapıştırma `Ctrl+V`'nin kendisini değil ayrı bir kısayolu kullanır: `Ctrl+V`'yi
+izlemek tüm tuş vuruşlarını gören bir klavye kancası gerektirir ve bu uygulama bilerek kanca
+kurmaz (bkz. Tasarım kararları).
+
+### Etiketler
+
+`Ctrl+T` arama kutusunu etiket girişine çevirir; yazıp `Enter`'a basınca seçili (ya da
+işaretli) öğeler etiketlenir. Var olan etiketler yazarken tamamlanır.
+
+- Etiketlenen öğe **sabitlenir**; limit ve otomatik temizlik onu silmez.
+- Aramaya `#uat` yazmak yalnızca o etiketle başlayanları, tek başına `#` etiketli her şeyi
+  gösterir; `#uat sorgu` etikete ek olarak içerikte de arar. Sağ tık > "Etikete göre süz"
+  aynı işi menüden yapar.
+- Boş bırakıp `Enter`'a basmak etiketi kaldırır (sabitleme kalır). Bir öğenin tek etiketi olur.
+
+### Uygulamaya göre kurallar
+
+Ayarlar > Kurallar. **Varsayılan olarak hiçbir kural yoktur.** Bir uygulamadan kopyalananlar
+için tek kural tanımlanır:
+
+| Kural | Etkisi |
+| --- | --- |
+| Kaydetme | O uygulamadan kopyalananlar geçmişe girmez (sayaçlara da yazılmaz) |
+| Etiketle | Kaydedilir, verilen etiketle etiketlenir ve sabitlenir |
+| Süre sonunda sil | Kaydedilir, verilen dakika dolunca kendiliğinden silinir |
+
+Uygulama adı listeden seçilir (geçmişte görülen uygulamalar önerilir) ya da yazılır;
+`excel` yazmak `excel.exe` sayılır. En kısa yol: geçmiş penceresinde bir öğeye sağ tık >
+"… için kural ekle"; ayarlar o uygulama seçili olarak açılır. Ayarlar > Gizlilik'teki
+"kaydedilmeyecek uygulamalar" listesi (parola yöneticileri) bundan ayrıdır ve aynen durur.
+
+### Dışa aktarma ve yedek
+
+- **Tüm geçmiş:** Tray > Yedek > "Geçmişi dışa aktar…". **Seçili öğeler:** `Ctrl+Shift+E`.
+- **JSON yedek** geri yüklenebilir (Tray > Yedek > "Yedekten içe aktar…"); **Markdown**
+  okunmak içindir, geri yüklenmez. Görseller dosyanın yanındaki `<ad>_gorseller` klasörüne
+  kopyalanır; yedeği taşırken klasörü de birlikte taşıyın.
+- İçe aktarma var olan öğeleri değiştirmez; yalnızca eksikleri ekler ve etiket, sabitleme ile
+  tarihleri geri yükler. İçe aktarılan sabitsiz öğeler kategori limitine tabidir.
+- Süreli (kendiliğinden silinecek) öğeler yedeğe girmez. Şablonlar ayrı dışa aktarılır
+  (Tray > Şablonlar).
+- Dışa aktarılan dosyalar **şifresizdir** ve kopyaladığınız her şeyi içerir.
+
+### İstatistikler
+
+Tray > İstatistikler: son 14 günün günlük kopyalama sayısı, en çok kopyalanan uygulamalar ve
+türlere göre dağılım. Yalnızca sayı tutulur (gün, tür, uygulama adı); kopyalanan içerik
+sayaçlara yazılmaz. Sayaçlar bu sürümden itibaren işler; "Sayaçları sıfırla" hepsini siler.
+
+### Link başlığı ve simgesi (isteğe bağlı, varsayılan kapalı)
+
+Ayarlar > Gizlilik > İnternet'ten açılırsa kopyalanan linkin sayfa başlığı ve site simgesi
+getirilir, listede adresin üstünde gösterilir ve başlıkla da aranabilir.
+
+- **Bu, uygulamanın ağ bağlantısı kurduğu tek özelliktir ve siz açmadıkça çalışmaz.**
+- Açıkken kopyaladığınız her genel internet adresine düz bir istek gönderilir; karşı sunucu
+  bu isteği ve IP adresinizi görür. Çerez ya da kimlik bilgisi gönderilmez.
+- Kurum içi adreslere istek yapılmaz: tek sözcüklü sunucu adları, `.local`/`.corp` gibi
+  uzantılar, yerel ve özel IP aralıkları ile kullanıcı adı/parola içeren adresler atlanır.
+- Sayfanın en çok 256 KB'ı okunur, 5 saniyede yanıt gelmezse vazgeçilir.
 
 ### Bir kopyayı geçmişe almadan geçmek
 
@@ -304,7 +408,8 @@ uygulamalardan (varsayılan: KeePass, KeePassXC, Bitwarden, 1Password) gelenler.
 
 ### Sınıflandırma
 
-Öncelik: dosya > metin/link > görsel. Metnin tamamı tek bir URL ise yalnızca Linkler'e düşer.
+Öncelik: dosya > metin/link/kod > görsel. Metnin tamamı tek bir URL ise yalnızca Linkler'e,
+kod olarak algılanırsa yalnızca Kod'a düşer.
 Metin ve görsel birlikte geldiğinde (ör. Excel hücresi) metin sayılır.
 
 ### Dosyalar
@@ -352,9 +457,10 @@ Bilinmesi gerekenler:
 
 ## Gizlilik
 
-Tüm veri `%LOCALAPPDATA%\Panolog\` altındadır (`panolog.db` ve `images\`). Uygulama ağ
-bağlantısı kurmaz, telemetri yoktur. SQLite `secure_delete` açıktır; silinen içerik dosyada
-kalmaz. Ayarlar > Gizlilik > "Tüm geçmişi sil" sabitlenenler dahil tüm geçmişi siler
+Tüm veri `%LOCALAPPDATA%\Panolog\` altındadır (`panolog.db` ve `images\`). Telemetri yoktur.
+Uygulama varsayılan ayarlarla hiçbir ağ bağlantısı kurmaz; tek istisna, sizin açmanız
+gereken "link başlığı ve simgesi" özelliğidir (yukarıda). SQLite `secure_delete` açıktır;
+silinen içerik dosyada kalmaz. Ayarlar > Gizlilik > "Tüm geçmişi sil" sabitlenenler dahil tüm geçmişi siler
 (şablonlar kalır).
 
 Uygulamanın eski adı Clipboarder'dı. Eski sürümden kalan veriler

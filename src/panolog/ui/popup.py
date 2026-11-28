@@ -5,8 +5,17 @@ import os
 import time
 
 from PySide6.QtCore import QEvent, QFileInfo, QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QCursor, QFontMetrics, QGuiApplication, QKeyEvent, QPixmap, QRegion
+from PySide6.QtGui import (
+    QCursor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QKeyEvent,
+    QPixmap,
+    QRegion,
+)
 from PySide6.QtWidgets import (
+    QCompleter,
     QFileIconProvider,
     QHBoxLayout,
     QLabel,
@@ -20,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import APP_NAME, winapi
+from .. import APP_NAME, codekind, transforms, winapi
 from ..classifier import Category
 from ..snippets import Snippet, SnippetRepository
 from ..storage.models import FileRef, Item
@@ -43,6 +52,7 @@ from .themes import (
 TABS: list[tuple[Category, str]] = [
     (Category.IMAGE, "Görseller"),
     (Category.TEXT, "Metinler"),
+    (Category.CODE, "Kod"),
     (Category.LINK, "Linkler"),
     (Category.FILE, "Dosyalar"),
 ]
@@ -79,7 +89,14 @@ _NOTE_CELL = QSize((_WIDTH - 20 - 4) // 2, 142)
 
 
 class _Row(QWidget):
-    def __init__(self, item: Item, number: int | None, text_width: int, theme: Theme) -> None:
+    def __init__(
+        self,
+        item: Item,
+        number: int | None,
+        text_width: int,
+        theme: Theme,
+        marked: bool = False,
+    ) -> None:
         super().__init__()
         # Tıklamalar listeye ulaşsın.
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -90,8 +107,10 @@ class _Row(QWidget):
         if wrap and item.pinned:
             text_width -= 24  # raptiye işaretine yer kalsın
 
-        badge = QLabel(str(number) if number else "")
-        badge.setObjectName("badge" if number else "")
+        badge = QLabel("✓" if marked else (str(number) if number else ""))
+        badge.setObjectName("badge" if number or marked else "")
+        if marked:  # çoklu seçimde işaretli öğe: her temada aynı yeşil onay
+            badge.setStyleSheet("color: #ffffff; background: #2f9e5a; border-radius: 4px;")
         badge.setFixedSize(20, 20)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
@@ -99,6 +118,10 @@ class _Row(QWidget):
         body = QVBoxLayout()
         body.setSpacing(2)
         meta_parts: list[str] = []
+        if item.kind in codekind.KINDS:
+            meta_parts.append(codekind.KINDS[item.kind])
+        if item.tag:
+            meta_parts.append(f"#{item.tag}")
         if item.category is Category.FILE:
             if item.files:
                 icon = QLabel()
@@ -154,6 +177,33 @@ class _Row(QWidget):
                     )
                 )
                 body.addWidget(ocr)
+        elif item.category is Category.CODE:
+            # Kod: eş aralıklı ve renkli. Metin önce kısaltılır, sonra kaçışlanarak
+            # renklendirilir; içerik hiçbir zaman HTML etiketi olarak yorumlanmaz.
+            main = QLabel()
+            main.setObjectName("code")
+            mono = QFont("Consolas")
+            mono.setStyleHint(QFont.StyleHint.Monospace)
+            mono.setPointSizeF(9.0)
+            main.setFont(mono)
+            shown = item.masked_text if item.masked_text is not None else item.text
+            max_chars = max(12, text_width // max(1, QFontMetrics(mono).averageCharWidth()) - 1)
+            # Girinti kodun parçasıdır; preview_lines'ın aksine baştaki boşluklar korunur.
+            source = [ln.rstrip().expandtabs(2) for ln in (shown or "").splitlines() if ln.strip()]
+            limit = max(3, theme.text_lines)
+            lines = [ln[:max_chars] + ("…" if len(ln) > max_chars else "") for ln in source[:limit]]
+            if len(source) > limit and lines:
+                lines[-1] = lines[-1].rstrip("…") + " …"
+            palette =codekind.PALETTE_DARK if theme.dark else codekind.PALETTE_LIGHT
+            main.setTextFormat(Qt.TextFormat.RichText)
+            main.setText(codekind.highlight_html("\n".join(lines), item.kind, palette))
+            if wrap:
+                main.setFixedWidth(text_width)
+                main.setFixedHeight(note_content_size(_NOTE_CELL).height() - 26)
+                main.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                body.addWidget(main, 1)
+            else:
+                body.addWidget(main)
         else:
             main = QLabel()
             main.setTextFormat(Qt.TextFormat.PlainText)  # içerik asla HTML olarak yorumlanmaz
@@ -161,6 +211,24 @@ class _Row(QWidget):
                 main.setObjectName("link")
             fm = QFontMetrics(main.font())
             shown = item.masked_text if item.masked_text is not None else item.text
+            if item.category is Category.LINK and item.link_title:
+                # Sayfa başlığı (isteğe bağlı özellik) üstte, adres altında gösterilir.
+                head = QHBoxLayout()
+                head.setSpacing(6)
+                if item.link_icon:
+                    icon = QLabel()
+                    pix = QPixmap()
+                    pix.loadFromData(item.link_icon)
+                    if not pix.isNull():
+                        icon.setPixmap(pix.scaled(16, 16, Qt.AspectRatioMode.KeepAspectRatio,
+                                                  Qt.TransformationMode.SmoothTransformation))
+                        icon.setFixedSize(16, 16)
+                        head.addWidget(icon)
+                title = QLabel()
+                title.setTextFormat(Qt.TextFormat.PlainText)
+                title.setText(fm.elidedText(item.link_title, Qt.TextElideMode.ElideRight, text_width - 22))
+                head.addWidget(title, 1)
+                body.addLayout(head)
             lines = preview_lines(shown or "", max_lines=theme.text_lines)
             if item.category is Category.TEXT and any(looks_like_code(ln) for ln in lines):
                 main.setObjectName("code")  # bazı temalar kodu eş aralıklı yazıyla gösterir
@@ -269,14 +337,52 @@ class _SnippetRow(QWidget):
 
 
 _HINT_HISTORY = (
-    "Enter yapıştır · Shift+Enter düz metin · Boşluk önizle · Ctrl+P sabitle · "
-    "Ctrl+S şablon yap · Del sil"
+    "Enter yapıştır · Boşluk önizle · Ctrl+D dönüştür · Ctrl+T etiketle · "
+    "Shift+↓ çoklu seç · F1 tuşlar"
 )
-_HINT_IMAGES = (
-    "Enter yapıştır · Boşluk büyüt · Ctrl+E düzenle · Ctrl+O metne çevir · "
-    "Ctrl+P sabitle · Del sil"
+_HINT_LINKS = (
+    "Enter yapıştır · Shift+Enter temiz link · Ctrl+T etiketle · Shift+↓ çoklu seç · F1 tuşlar"
 )
-_HINT_SNIPPETS = "Enter yapıştır · Boşluk önizle · Ctrl+N yeni · Ctrl+E düzenle · Del sil"
+_HINT_FILES = "Enter yapıştır · Shift+Enter yol olarak · Ctrl+T etiketle · Shift+↓ çoklu seç · F1 tuşlar"
+_HINT_IMAGES = "Enter yapıştır · Boşluk büyüt · Ctrl+E düzenle · Ctrl+O metne çevir · F1 tuşlar"
+_HINT_SNIPPETS = "Enter yapıştır · Boşluk önizle · Ctrl+N yeni · Ctrl+E düzenle · Del sil · F1 tuşlar"
+_HINT_TAG = "Etiket yazın · Enter kaydet · boş bırakıp Enter: etiketi kaldır · Esc vazgeç"
+_HINT_MARKED = "{n} öğe seçili · Enter birleştirip yapıştır · Ctrl+Enter sıralı yapıştır · Del sil"
+HELP_TEXT = """TÜM TUŞLAR
+
+Gezinme
+  ↑ ↓            listede gezin
+  ← → / Tab      sekme değiştir (oklar arama boşken)
+  yazmaya başla  ara  ·  #etiket  etikete göre süz
+  Esc            kapat
+
+Yapıştırma
+  Enter          seçili öğeyi yapıştır
+  Shift+Enter    düz metin / temiz link / dosya yolu
+  1-9            ilk dokuz öğeyi doğrudan yapıştır
+  Ctrl+D         dönüştürerek yapıştır (büyük harf, JSON…)
+
+Çoklu seçim
+  Shift+↓ ↑      öğeyi işaretle ve ilerle
+  Enter          işaretlileri birleştirip yapıştır
+  Ctrl+Enter     işaretlileri sıralı yapıştırmaya al
+  Ctrl+Shift+E   işaretlileri (ya da seçili öğeyi) dışa aktar
+
+Düzen
+  Ctrl+P         sabitle / sabitlemeyi kaldır
+  Ctrl+T         etiketle
+  Ctrl+S         şablon olarak kaydet
+  Del            sil
+
+Önizleme ve görseller
+  Boşluk         önizle / büyüt
+  Ctrl+E         görseli düzenle
+  Ctrl+O         görseldeki metni çıkar (OCR)
+  Ctrl+Shift+S   görseli PNG olarak kaydet
+
+Şablonlar
+  Ctrl+N         yeni şablon
+  Ctrl+E         şablonu düzenle"""
 _HINT_CONFIRM = "Şablonu silmek için Delete'e tekrar basın"
 
 
@@ -288,6 +394,11 @@ class Popup(QWidget):
     ocrRequested = Signal(int)  # görseldeki metni çıkar
     editImageRequested = Signal(int)  # görseli düzenleyicide aç
     saveImageRequested = Signal(int)  # görseli PNG dosyası olarak kaydet
+    pasteTextRequested = Signal(str)  # dönüştürülmüş metni yapıştır (geçmişe eklenmez)
+    pasteManyRequested = Signal(list)  # işaretli öğeleri birleştirip yapıştır
+    queueRequested = Signal(list)  # öğeleri sıralı yapıştırma kuyruğuna al
+    exportRequested = Signal(list)  # öğeleri dışa aktar
+    ruleRequested = Signal(str)  # bu uygulama için kural ekle
     changed = Signal()
 
     def __init__(self, repo: Repository, snippets: SnippetRepository) -> None:
@@ -302,6 +413,11 @@ class Popup(QWidget):
         self._items: list = []  # geçmiş sekmelerinde Item, Şablonlar sekmesinde Snippet
         self._confirm_delete: int | None = None
         self._status: str | None = None  # ipucu satırında geçici durum mesajı
+        self._marks: list[int] = []  # çoklu seçim: işaretlenme sırasıyla öğe kimlikleri
+        self._tag_mode = False  # arama kutusu geçici olarak etiket girişi için kullanılıyor
+        self._tag_targets: list[int] = []
+        self._saved_query = ""
+        self._help_open = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(_WIDTH, _HEIGHT)
         self._theme = get_theme(DEFAULT_THEME)
@@ -332,7 +448,7 @@ class Popup(QWidget):
         self._search = QLineEdit()
         self._search.setPlaceholderText("Aramak için yazın…")
         self._search.setClearButtonEnabled(True)
-        self._search.textChanged.connect(lambda _t: self.refresh())
+        self._search.textChanged.connect(self._on_search_changed)
         self._search.installEventFilter(self)
         lay.addWidget(self._search)
 
@@ -345,7 +461,7 @@ class Popup(QWidget):
             self._tabs.addTab(title)
         self._tabs.addTab("Şablonlar")
         self._tabs.setCurrentIndex(1)
-        self._tabs.currentChanged.connect(lambda _i: self.refresh())
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         lay.addWidget(self._tabs)
 
         self._list = QListWidget()
@@ -454,6 +570,10 @@ class Popup(QWidget):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._tick.stop()
+        self._marks.clear()
+        self._help_open = False
+        if self._tag_mode:
+            self._end_tag_mode()
         self._hover_row = -1
         self._hover_timer.stop()
         self._preview_pinned = False
@@ -505,9 +625,27 @@ class Popup(QWidget):
         self._hint.setText(message)
 
     def _default_hint(self) -> str:
+        if self._tag_mode:
+            return _HINT_TAG
         if self.on_snippets_tab():
             return _HINT_SNIPPETS
-        return _HINT_IMAGES if self.current_category() is Category.IMAGE else _HINT_HISTORY
+        if self._marks:
+            return _HINT_MARKED.format(n=len(self._marks))
+        return {
+            Category.IMAGE: _HINT_IMAGES,
+            Category.LINK: _HINT_LINKS,
+            Category.FILE: _HINT_FILES,
+        }.get(self.current_category(), _HINT_HISTORY)
+
+    def _on_search_changed(self, _text: str) -> None:
+        if not self._tag_mode:  # etiket yazılırken liste süzülmez
+            self.refresh()
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._marks.clear()
+        if self._tag_mode:
+            self._end_tag_mode()
+        self.refresh()
 
     def current_category(self) -> Category:
         return TABS[self._tabs.currentIndex()][0]
@@ -534,7 +672,7 @@ class Popup(QWidget):
             text_width = _WIDTH - 110 - extra
             for i, item in enumerate(self._items):
                 number = i + 1 if i < 9 else None
-                row = row_cls(item, number, text_width, theme)
+                row = self._make_row(row_cls, item, number, text_width)
                 lw = QListWidgetItem()
                 lw.setSizeHint(QSize(0, row.sizeHint().height()))
                 self._list.addItem(lw)
@@ -563,7 +701,7 @@ class Popup(QWidget):
         text_width = size.width() - margins[0] - margins[2] - 30  # numara rozeti + boşluk
         ratio = self.devicePixelRatioF()
         for i, item in enumerate(self._items):
-            row = row_cls(item, i + 1 if i < 9 else None, text_width, theme)
+            row = self._make_row(row_cls, item, i + 1 if i < 9 else None, text_width)
             row.setStyleSheet(theme.row_qss)
             row.setFixedSize(size)
             row.ensurePolished()
@@ -578,6 +716,135 @@ class Popup(QWidget):
             lw.setData(ROLE_PIXMAP, pixmap)
             lw.setData(ROLE_SEED, int(item.id))
             self._list.addItem(lw)
+
+    def _make_row(self, row_cls, item, number: int | None, text_width: int) -> QWidget:
+        if row_cls is _Row:
+            return _Row(item, number, text_width, self._theme, item.id in self._marks)
+        return row_cls(item, number, text_width, self._theme)
+
+    # ---- çoklu seçim ----------------------------------------------------------
+    def marked_ids(self) -> list[int]:
+        return list(self._marks)
+
+    def _toggle_mark(self, row: int) -> None:
+        if self.on_snippets_tab() or not 0 <= row < len(self._items):
+            return
+        item_id = self._items[row].id
+        if item_id in self._marks:
+            self._marks.remove(item_id)
+        else:
+            self._marks.append(item_id)
+        self.refresh()
+
+    def _targets(self) -> list[int]:
+        """İşlem uygulanacak öğeler: işaretliler, yoksa seçili öğe."""
+        if self._marks:
+            return list(self._marks)
+        item = None if self.on_snippets_tab() else self._selected()
+        return [item.id] if item is not None else []
+
+    # ---- etiketleme -----------------------------------------------------------
+    def _begin_tag_mode(self) -> None:
+        targets = self._targets()
+        if not targets:
+            return
+        current = self._selected()
+        self._tag_targets = targets
+        self._saved_query = self._search.text()
+        self._tag_mode = True
+        self._hide_preview()
+        completer = QCompleter([name for name, _n in self._repo.tags()], self._search)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        # Açılır liste ayrı bir pencere olur ve popup'ı kapatır; satır içi tamamlama kullanılır.
+        completer.setCompletionMode(QCompleter.CompletionMode.InlineCompletion)
+        self._search.setCompleter(completer)
+        self._search.setPlaceholderText("Etiket (ör. uat)")
+        self._search.setText((current.tag or "") if current is not None and len(targets) == 1 else "")
+        self._search.selectAll()
+        self._status = None
+        self._hint.setText(_HINT_TAG)
+
+    def _end_tag_mode(self) -> None:
+        self._tag_mode = False
+        self._tag_targets = []
+        self._search.setCompleter(None)
+        self._search.setPlaceholderText("Aramak için yazın…")
+        self._search.blockSignals(True)
+        self._search.setText(self._saved_query)
+        self._search.blockSignals(False)
+
+    def _apply_tag(self) -> None:
+        tag, targets = self._search.text(), self._tag_targets
+        self._end_tag_mode()
+        changed = self._repo.set_tag(targets, tag)
+        self._marks.clear()
+        self.refresh()
+        clean = " ".join(tag.replace("#", " ").split())
+        if clean:
+            self.show_status(f"{changed} öğe '#{clean[:40]}' ile etiketlendi ve sabitlendi")
+        else:
+            self.show_status(f"{changed} öğenin etiketi kaldırıldı")
+        self.changed.emit()
+
+    # ---- dönüştürerek yapıştırma ------------------------------------------------
+    def _transform_entries(self, item) -> list:
+        if item is None or self.on_snippets_tab():
+            return []
+        if item.category is Category.LINK:
+            return list(transforms.LINK_TRANSFORMS)
+        if item.category in (Category.TEXT, Category.CODE):
+            return list(transforms.TEXT_TRANSFORMS)
+        return []
+
+    def _run_transform(self, item, fn) -> None:
+        try:
+            result = fn(item.text or "")
+        except transforms.TransformError as exc:
+            self.show_status(str(exc))
+            return
+        self.pasteTextRequested.emit(result)
+
+    def _fill_transform_menu(self, menu: QMenu, item) -> None:
+        for entry in self._transform_entries(item):
+            if entry is None:
+                menu.addSeparator()
+            else:
+                label, fn = entry
+                menu.addAction(label, lambda fn=fn: self._run_transform(item, fn))
+
+    def _show_transform_menu(self) -> None:
+        item = self._selected()
+        if not self._transform_entries(item):
+            if item is not None:
+                self.show_status("Dönüştürme yalnızca metin, kod ve linklerde çalışır")
+            return
+        menu = QMenu(self)
+        self._fill_transform_menu(menu, item)
+        rect = self._list.visualItemRect(self._list.currentItem())
+        self._exec_menu(menu, self._list.viewport().mapToGlobal(rect.bottomLeft() + QPoint(40, -4)))
+
+    def _exec_menu(self, menu: QMenu, global_pos: QPoint) -> None:
+        # Menü açıkken popup etkinliğini yitirebilir; bu yüzden kendini kapatmamalı.
+        self._hover_timer.stop()
+        self._menu_open = True
+        try:
+            menu.exec(global_pos)
+        finally:
+            self._menu_open = False
+        if self.isVisible():
+            self.activateWindow()
+            self._search.setFocus()
+
+    def _toggle_help(self) -> None:
+        if self._help_open:
+            self._help_open = False
+            self._hide_preview()
+            return
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        self._preview_pinned = False
+        self._help_open = self._preview.show_text(
+            HELP_TEXT, self.frameGeometry(), screen.availableGeometry()
+        )
 
     def _selected(self):
         row = self._list.currentRow()
@@ -597,7 +864,7 @@ class Popup(QWidget):
         item = self._items[row]
         if self.on_snippets_tab():
             return None if item.is_image else item.content
-        if item.category in (Category.TEXT, Category.LINK):
+        if item.category in (Category.TEXT, Category.CODE, Category.LINK):
             # Maskelenmiş (hassas) öğenin asıl metni önizlemede de gösterilmez.
             return item.masked_text if item.masked_text is not None else item.text
         return None
@@ -627,7 +894,10 @@ class Popup(QWidget):
             )
         text = self._text_at(row)
         if text:
-            return self._preview.show_text(text, self.frameGeometry(), area)
+            entry = self._items[row]
+            kind = getattr(entry, "kind", None)
+            palette = codekind.PALETTE_DARK if self._theme.dark else codekind.PALETTE_LIGHT
+            return self._preview.show_text(text, self.frameGeometry(), area, kind, palette)
         self._preview.hide()
         return False
 
@@ -685,10 +955,12 @@ class Popup(QWidget):
             return
         self._list.setCurrentRow(row)
         item = self._items[row]
-        self._hover_timer.stop()
+        snippets_tab = self.on_snippets_tab()
         menu = QMenu(self)
         menu.addAction("Yapıştır", lambda: self._paste_row(row, False))
-        if not self.on_snippets_tab() and item.category is Category.IMAGE:
+        if not snippets_tab and self._transform_entries(item):
+            self._fill_transform_menu(menu.addMenu("Dönüştürerek yapıştır\tCtrl+D"), item)
+        if not snippets_tab and item.category is Category.IMAGE:
             menu.addAction("Büyüt\tBoşluk", self._toggle_preview)
             menu.addAction("Düzenle…\tCtrl+E", lambda: self.editImageRequested.emit(item.id))
             menu.addAction(
@@ -697,23 +969,38 @@ class Popup(QWidget):
             menu.addAction("Metne çevir (OCR)\tCtrl+O", lambda: self.ocrRequested.emit(item.id))
         elif self._can_preview(row):
             menu.addAction("Önizle\tBoşluk", self._toggle_preview)
-        if self.on_snippets_tab():
+        if snippets_tab:
             menu.addAction("Düzenle…\tCtrl+E", lambda: self.editSnippetRequested.emit(item.id))
         else:
+            menu.addSeparator()
+            marked = item.id in self._marks
+            menu.addAction(
+                "İşareti kaldır\tShift+↓" if marked else "İşaretle (çoklu seçim)\tShift+↓",
+                lambda: self._toggle_mark(row),
+            )
             menu.addAction(
                 "Sabitlemeyi kaldır\tCtrl+P" if item.pinned else "Sabitle\tCtrl+P", self._toggle_pin
             )
+            menu.addAction("Etiketle…\tCtrl+T", self._begin_tag_mode)
+            tags = self._repo.tags(self.current_category())
+            if tags:
+                by_tag = menu.addMenu("Etikete göre süz")
+                by_tag.addAction("Tümünü göster", lambda: self._search.setText(""))
+                for name, count in tags:
+                    by_tag.addAction(
+                        f"#{name}  ({count})", lambda name=name: self._search.setText(f"#{name}")
+                    )
+            menu.addAction(
+                "Dışa aktar…\tCtrl+Shift+E", lambda: self.exportRequested.emit(self._targets())
+            )
+            if item.source_app:
+                menu.addAction(
+                    f"{app_label(item.source_app)} için kural ekle…",
+                    lambda: self.ruleRequested.emit(item.source_app),
+                )
         menu.addSeparator()
         menu.addAction("Sil\tDel", self._delete_selected)
-        # Menü açıkken popup etkinliğini yitirebilir; bu yüzden kendini kapatmamalı.
-        self._menu_open = True
-        try:
-            menu.exec(self._list.viewport().mapToGlobal(pos))
-        finally:
-            self._menu_open = False
-        if self.isVisible():
-            self.activateWindow()
-            self._search.setFocus()
+        self._exec_menu(menu, self._list.viewport().mapToGlobal(pos))
 
     def _move(self, step: int) -> None:
         n = len(self._items)
@@ -734,6 +1021,13 @@ class Popup(QWidget):
                 self.pasteRequested.emit(self._items[row].id, plain)
 
     def _delete_selected(self) -> None:
+        if self._marks and not self.on_snippets_tab():
+            for item_id in self._marks:
+                self._repo.delete(item_id)
+            self._marks.clear()
+            self.refresh()
+            self.changed.emit()
+            return
         item = self._selected()
         if item is None:
             return
@@ -784,6 +1078,22 @@ class Popup(QWidget):
         empty = not self._search.text()
         K = Qt.Key
         snippets_tab = self.on_snippets_tab()
+        modifier_only = key in (K.Key_Control, K.Key_Shift, K.Key_Alt, K.Key_Meta)
+        if self._tag_mode:  # arama kutusu etiket girişi olarak çalışıyor
+            if key in (K.Key_Return, K.Key_Enter):
+                self._apply_tag()
+            elif key == K.Key_Escape:
+                self._end_tag_mode()
+                self.refresh()
+            else:
+                return False
+            return True
+        if self._help_open and not modifier_only:
+            self._help_open = False
+            self._hide_preview()
+            if key in (K.Key_F1, K.Key_Escape):
+                return True
+        ctrl_shift = mods == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
         if key not in (K.Key_Control, K.Key_Shift, K.Key_Alt, K.Key_Meta) and self._status:
             self._status = None
             self._hint.setText(self._default_hint())
@@ -797,8 +1107,31 @@ class Popup(QWidget):
             self._move(1)
         elif key == K.Key_Up and no_mod:
             self._move(-1)
+        elif key == K.Key_F1:
+            self._toggle_help()
+        elif key in (K.Key_Down, K.Key_Up) and shift and not snippets_tab:
+            self._toggle_mark(self._list.currentRow())
+            self._move(1 if key == K.Key_Down else -1)
+        elif key in (K.Key_Return, K.Key_Enter) and ctrl and not snippets_tab:
+            targets = self._targets()
+            if targets:
+                self.queueRequested.emit(targets)
+        elif key in (K.Key_Return, K.Key_Enter) and no_mod and self._marks and not snippets_tab:
+            self.pasteManyRequested.emit(list(self._marks))
+        elif key in (K.Key_Return, K.Key_Enter) and shift and not snippets_tab and (
+            (item := self._selected()) is not None and item.category is Category.LINK
+        ):
+            self.pasteTextRequested.emit(transforms.clean_url(item.text or ""))
         elif key in (K.Key_Return, K.Key_Enter) and (no_mod or shift):
             self._paste_row(self._list.currentRow(), shift)
+        elif key == K.Key_D and ctrl and not snippets_tab:
+            self._show_transform_menu()
+        elif key == K.Key_T and ctrl and not snippets_tab:
+            self._begin_tag_mode()
+        elif key == K.Key_E and ctrl_shift and not snippets_tab:
+            targets = self._targets()
+            if targets:
+                self.exportRequested.emit(targets)
         elif key == K.Key_Tab and (no_mod or ctrl):
             self._switch_tab(1)
         elif key == K.Key_Backtab or (key == K.Key_Tab and shift):
